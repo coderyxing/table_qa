@@ -1,3 +1,5 @@
+# 脚本用途：使用 FeTaQA 官方训练答案构建独立答案监督基线，训练并保存自动评价。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Independent FeTaQA answer-only baseline, using official training answers.
 
 This is ordinary B0 SFT, not reviewed operation-chain distillation or a proposed
@@ -22,26 +24,43 @@ from tableqa.reporting import freeform_metrics, compare_freeform
 from tableqa.training import encode_record, prepare_training_data, train
 
 
+# 创建输出目录并保存当前阶段的结构化产物。
+# 输入：path（输入或输出路径）；value。
+# 相关调用：Path(path).write_text。
 def save(path,value):Path(path).write_text(json.dumps(value,ensure_ascii=False,indent=2),encoding='utf-8')
+# 读取指定结构化产物，交由当前阶段核验来源和配置。
+# 输入：path（输入或输出路径）。
+# 相关调用：Path(path).read_text。
 def load(path):return json.loads(Path(path).read_text(encoding='utf-8'))
+# 计算文件或产物内容摘要，供模型、输入和协议绑定。
+# 输入：path（输入或输出路径）。
+# 相关调用：hashlib.sha256(Path(path).read_bytes()).hexdigest。
 def sha(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+# 解析当前脚本参数，按模块说明执行本次冻结阶段并保存产物。
+# 相关调用：read_jsonl、AutoTokenizer.from_pretrained、prepare_training_data、write_jsonl。
+# 异常约束：Preserve existing attempt; output already exists
 def main():
+    # 定义本入口的参数解析器；位置参数、默认值和允许取值由相邻 add_argument 明确声明。
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('output');args=parser.parse_args();root=Path(args.output)
     if root.exists():raise ValueError('Preserve existing attempt; output already exists')
     if shutil.disk_usage('.').free<8*1024**3:raise ValueError('Keep 8 GiB free before starting')
     previous=Path('runs/fetaqa-transfer-v1/results')
     if not load(previous/'completion-audit.json')['passed']:raise ValueError('Previous transfer audit required')
+    # 读取结构化输入：previous / 'samples.jsonl'，保留原有样本身份字段。
     old=load(previous/'protocol.json');samples=read_jsonl(previous/'samples.jsonl')
     if digest(samples)!=old['samples_sha256']:raise ValueError('Validation cohort changed')
     model_config={k:v for k,v in old['model_config'].items() if k not in {'adapter','adapter_revision','cache'}}
     model_config['device_map']='auto'
     from transformers import AutoTokenizer
+    # 使用本阶段指定的 tokenizer；预算、提示模板与监督掩码应沿用同一版本。
     tokenizer=AutoTokenizer.from_pretrained(model_config['model']);tokenizer.pad_token=tokenizer.eos_token
+    # 读取结构化输入：'data/normalized/joint_train_clean.jsonl'，保留原有样本身份字段。
     maximum=8192;pool=read_jsonl('data/normalized/joint_train_clean.jsonl')
     if any(s['split']!='train' for s in pool):raise ValueError('Only training split may enter the pool')
     candidates=sorted([s for s in pool if s['dataset']=='fetaqa'],key=lambda s:s['id']);random.Random(2037).shuffle(candidates)
+    # 读取结构化输入：'data/normalized/joint_validation_clean.jsonl'，保留原有样本身份字段。
     validation=read_jsonl('data/normalized/joint_validation_clean.jsonl')
     validation_fps={table_fingerprint(s['table']) for s in validation}
     selected=[];records=[];seen=set();skipped={'overlength':0,'duplicate_table':0,'validation_table_overlap':0}
@@ -86,22 +105,31 @@ def main():
                         'No human factuality review or cross-task retention measurement.']}
     root.mkdir(parents=True);save(root/'protocol.json',protocol);save(root/'run.json',metadata(protocol))
     save(root/'preflight.json',preflight);save(root/'training-config.json',config)
+    # 保存逐条结构化产物到 root / 'train-samples.jsonl'，供后续重放或审核读取。
     write_jsonl(root/'train-samples.jsonl',selected);write_jsonl(root/'records.jsonl',records);write_jsonl(root/'validation-samples.jsonl',samples)
     print('FETAQA_B0_FROZEN',len(records),target_tokens,flush=True)
     import torch
     outputs={}
+    # 在约定的固定队列上生成预测并汇总评价。
+    # 输入：name；adapter。
+    # 相关调用：write_jsonl。
+    # 异常约束：SD must actually load the saved LoRA adapter
     def evaluate(name,adapter=None):
+        # 按已读取配置构造生成后端，实际模型身份和预算由该配置登记。
         model=make_model({**model_config,**({'adapter':str(adapter.resolve())} if adapter else {})});rows=[]
         if name=='SD' and (adapter is None or not getattr(model.model,'peft_config',None)):
             raise ValueError('SD must actually load the saved LoRA adapter')
         for i,sample in enumerate(samples):
+            # 对当前样本运行完整推理入口，返回值包含答案、状态、错误和调用成本。
             prediction=predict(sample,model,settings('B0',max_repairs=0));prediction['metrics']['latency_comparable']=False
+            # 保存逐条结构化产物到 root / f'{name}-predictions.jsonl'，供后续重放或审核读取。
             rows.append(prediction);write_jsonl(root/f'{name}-predictions.jsonl',rows)
             save(root/'progress.json',{'condition':name,'completed':i+1,'expected':len(samples)})
             print('FETAQA_B0_EVALUATION',name,i+1,len(samples),prediction['status'],flush=True)
         outputs[name]=rows;del model;gc.collect();torch.cuda.empty_cache()
     evaluate('QD')
     save(root/'phase.json',{'phase':'training','steps_expected':32})
+    # 执行当前配置的训练阶段，输出检查点与实际训练记录统计。
     statistics=train(config,records,root/'adapter');save(root/'statistics.json',statistics)
     gc.collect();torch.cuda.empty_cache()
     history=load(root/'adapter/training_history.json');actual_steps=max(row.get('step',0) for row in history)

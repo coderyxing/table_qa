@@ -1,4 +1,5 @@
 [build-system]
+# 使用 setuptools 构建包，源码由 tableqa* 包发现规则收集。
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
@@ -8,13 +9,17 @@ version = "0.1.0"
 description = "Executable, provenance-preserving table reasoning and block distillation"
 requires-python = ">=3.10"
 dependencies = []
+# 核心执行与回放使用标准库，GPU 和自动指标通过可选依赖组安装。
 
 [project.optional-dependencies]
+# train 对应 LoRA 训练，metrics 对应自由文本指标，databench 对应完整表及官方判分。
+# 正式 GPU 环境在安装后另存 pip freeze，保留实际验证过的版本组合。
 train = ["torch>=2.2,<3", "transformers>=4.46,<5", "peft>=0.13,<0.19", "accelerate>=1,<2", "safetensors>=0.4"]
 metrics = ["sacrebleu>=2.4,<3", "rouge-score>=0.1.2,<0.2"]
 databench = ["databench-eval==4.0.1", "datasets>=3,<5", "pyarrow>=16"]
 
 [project.scripts]
+# 安装后的 tableqa 命令与 python -m tableqa 共用这个入口。
 tableqa = "tableqa.cli:main"
 
 [tool.setuptools.packages.find]

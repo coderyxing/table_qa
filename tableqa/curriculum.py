@@ -1,3 +1,5 @@
+# 模块职责：在完整训练记录上匹配监督类型、来源覆盖及目标 token，构建课程学习的受控日程。
+# 接口约定：样本、操作和结果采用本项目的结构化字典；细节见各入口及字段检查。
 """Frozen record schedules for a target-token/step matched curriculum pilot.
 
 Exact target budgets do NOT imply equal input tokens, GPU time, source diversity
@@ -9,6 +11,9 @@ import random
 from .data import digest
 
 
+# 保留所有来源记录，再平衡监督类型并对齐累积批次。
+# 输入：records（规范记录序列）；tokenizer（学生分词器）；multiple；seed（随机种子）。
+# 异常约束：An even positive effective optimizer batch is required
 def equal_kind_coverage(records, tokenizer, multiple=16, seed=42):
     """Keep every input record, then balance kinds and pad using paired replays."""
     if type(multiple) is not int or multiple < 2 or multiple % 2:
@@ -30,6 +35,10 @@ def equal_kind_coverage(records, tokenizer, multiple=16, seed=42):
     return deepcopy(result)
 
 
+# 用位集动态规划匹配完整目标记录的数量与 token 成本，保留可回溯选择。
+# 输入：pool；desired_costs；tokenizer（学生分词器）；seed（随机种子）。
+# 返回形式含：selected。
+# 异常约束：Bounded nonempty record/cost pools required
 def match_record_costs(pool, desired_costs, tokenizer, seed=42):
     """Match N complete target records and their total tokens exactly, with replay.
 
@@ -67,10 +76,16 @@ def match_record_costs(pool, desired_costs, tokenizer, seed=42):
     return selected
 
 
+# 用学生 tokenizer 计算目标及终止符的真实监督长度。
+# 输入：record；tokenizer（学生分词器）。
 def target_cost(record, tokenizer):
     return len(tokenizer.encode(record['target'], add_special_tokens=False)) + 1
 
 
+# 生成预算匹配的分层键，区分任务、监督类型及标签。
+# 输入：record。
+# 返回形式含：3 项组成的结果。
+# 异常约束：Training-only TabFact labels are required for schedule auditing
 def stratum(record):
     label = record.get('sampling_label') if record['dataset'] == 'tabfact' else None
     if record['dataset'] == 'tabfact' and (type(label) is not int or label not in (0, 1)):
@@ -78,6 +93,11 @@ def stratum(record):
     return record['dataset'], record['kind'], label
 
 
+# 构建在各层内匹配的训练日程，报告实际来源和监督预算。
+# 输入：real_records；synthetic_records；tokenizer（学生分词器）；multiple；seed（随机种子）。
+# 相关调用：digest。
+# 返回形式含：3 项组成的结果 / 字段 records、target_tokens、target_by_kind、source_ids、strata、records_sha256。
+# 异常约束：Matched schedule invariants violated
 def matched_schedules(real_records, synthetic_records, tokenizer, multiple=16, seed=42):
     common = equal_kind_coverage(real_records, tokenizer, multiple, seed)
     treatment_extra = equal_kind_coverage(synthetic_records, tokenizer, multiple, seed + 1)
@@ -112,6 +132,10 @@ def matched_schedules(real_records, synthetic_records, tokenizer, multiple=16, s
         for record, condition in [(a, 'real_replay'), (b, 'synthetic_curriculum')]:
             record['frozen_slot'] = i; record['schedule_part'] = origin; record['condition'] = condition
         control.append(a); treatment.append(b)
+    # 汇总冻结训练日程的来源、分层记录数与真实监督成本。
+    # 输入：rows。
+    # 相关调用：digest。
+    # 返回形式含：字段 records、target_tokens、target_by_kind、source_ids、strata、records_sha256。
     def summary(rows):
         return {'records': len(rows), 'target_tokens': sum(target_cost(r, tokenizer) for r in rows),
                 'target_by_kind': {k: sum(target_cost(r, tokenizer) for r in rows if r['kind'] == k) for k in ['block', 'answer']},

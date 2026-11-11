@@ -1,3 +1,5 @@
+# 模块职责：提供通用命令行入口，串联数据适配、预测、蒸馏记录、训练、预算和报告。
+# 接口约定：样本、操作和结果采用本项目的结构化字典；细节见各入口及字段检查。
 """CLI: python -m tableqa <command>. No network or model downloads in demo."""
 import argparse
 from dataclasses import asdict
@@ -11,11 +13,18 @@ import sys
 from .data import read_jsonl, write_jsonl, digest
 
 
+# 创建父目录后保存 UTF-8 JSON，为元数据与报告提供统一写入入口。
+# 输入：path（输入或输出路径）；value。
+# 相关调用：p.write_text。
 def save(path,value):
     p=Path(path); p.parent.mkdir(parents=True,exist_ok=True)
     p.write_text(json.dumps(value,ensure_ascii=False,indent=2),encoding="utf-8")
 
 
+# 登记依赖版本、源码摘要和运行配置，供后续结果追溯。
+# 输入：config（显式运行配置）。
+# 相关调用：digest、p.read_text。
+# 返回形式含：字段 python、platform、packages、git_commit、source_hash、config。
 def metadata(config):
     packages={}
     for name in ["torch","transformers","peft","accelerate"]:
@@ -29,7 +38,12 @@ def metadata(config):
             "git_commit":commit,"source_hash":source_hash,"config":config}
 
 
+# 解析子命令并路由到数据、推理、训练或分析接口。
+# 输入：argv（命令参数列表）。
+# 相关调用：write_jsonl、read_jsonl、Path(args.official_wtq).read_text、AutoTokenizer.from_pretrained。
+# 异常约束：Search requires a compressed supervision mode
 def main(argv=None):
+    # 定义本入口的参数解析器；位置参数、默认值和允许取值由相邻 add_argument 明确声明。
     p=argparse.ArgumentParser(description=__doc__); sub=p.add_subparsers(dest="command",required=True)
     q=sub.add_parser("adapt"); q.add_argument("dataset",choices=["wikitq","tabfact","fetaqa"])
     q.add_argument("source"); q.add_argument("output"); q.add_argument("--split",required=True,choices=["train","validation","test"]); q.add_argument("--table-root")
@@ -55,9 +69,11 @@ def main(argv=None):
     q=sub.add_parser("report"); q.add_argument("data"); q.add_argument("predictions"); q.add_argument("output_dir"); q.add_argument("--freeform-metrics",action="store_true")
     q=sub.add_parser("diagnose"); q.add_argument("data"); q.add_argument("predictions"); q.add_argument("replacements"); q.add_argument("output")
     q=sub.add_parser("demo"); q.add_argument("--output",default="runs/demo")
+    # 解析本次命令的实际参数，后续样本路径和实验开关均由此确定。
     args=p.parse_args(argv)
     if args.command=="adapt":
         from .data import adapt
+        # 保存逐条结构化产物到 args.output，供后续重放或审核读取。
         write_jsonl(args.output,adapt(args.dataset,args.source,args.split,args.table_root))
     elif args.command=="audit":
         from .data import audit
@@ -73,6 +89,7 @@ def main(argv=None):
         predict_command(args)
     elif args.command=="evaluate":
         from .evaluation import evaluate, subgroup_report
+        # 读取结构化输入：args.predictions，保留原有样本身份字段。
         ps=read_jsonl(args.predictions); data=read_jsonl(args.data)
         save(args.output,{"metrics":evaluate(ps,data),"subgroups":subgroup_report(ps,data)})
     elif args.command=="build-records":
@@ -84,6 +101,7 @@ def main(argv=None):
         if args.partition_policy!='fixed':
             if args.mode!='B5' or not args.tokenizer:raise ValueError('State-cost partitions require B5 and a pinned local tokenizer')
             from transformers import AutoTokenizer
+            # 使用本阶段指定的 tokenizer；预算、提示模板与监督掩码应沿用同一版本。
             tokenizer=AutoTokenizer.from_pretrained(args.tokenizer,local_files_only=True)
         if args.compression_policy!='legacy' and args.mode not in {'B3','B4','B5','B5_no_blocks'}:
             raise ValueError('Search requires a compressed supervision mode')
@@ -125,6 +143,7 @@ def main(argv=None):
                 typed_quantities=args.typed_quantities,semantic_extract=args.semantic_extract,
                 tool_demonstrations=args.tool_demonstrations))
         write_jsonl(args.output,out)
+        # 保存逐条结构化产物到 args.output + '.optimization.jsonl'，供后续重放或审核读取。
         write_jsonl(args.output+'.optimization.jsonl',optimization)
         save(args.output+".filter.json",{"rejected_ids":rejected,"records":len(out),"semantic_correctness_proven":False,
             'compression_policy':args.compression_policy,'partition_policy':args.partition_policy,'tokenizer':args.tokenizer,
@@ -133,21 +152,25 @@ def main(argv=None):
     elif args.command=="train":
         from .training import train
         cfg=json.loads(Path(args.config).read_text(encoding="utf-8"))
+        # 读取结构化输入：args.records，保留原有样本身份字段。
         stats=train(cfg,read_jsonl(args.records),args.output,read_jsonl(args.validation) if args.validation else None)
         save(Path(args.output)/"run.json",{**metadata(cfg),"statistics":stats})
     elif args.command=="split":
         from .data import protocol_split,nested_samples
         annotations=json.loads(Path(args.annotations).read_text(encoding="utf-8")) if args.annotations else None
         partitions=protocol_split(read_jsonl(args.data),args.target,args.topic,annotations)
+        # 保存逐条结构化产物到 Path(args.output_dir) / (name + '.jsonl')，供后续重放或审核读取。
         for name,records in partitions.items(): write_jsonl(Path(args.output_dir)/(name+".jsonl"),records)
         if args.target:
             for n,records in nested_samples(partitions["target_train"],[32,128,512],args.seed).items():
+                # 保存逐条结构化产物到 Path(args.output_dir) / f'fewshot_{n}.jsonl'，供后续重放或审核读取。
                 write_jsonl(Path(args.output_dir)/f"fewshot_{n}.jsonl",records)
     elif args.command=="cases":
         from .evaluation import select_cases
         write_jsonl(args.output,select_cases(read_jsonl(args.predictions),args.seed))
     elif args.command=="perturb":
         from .protocols import perturb
+        # 读取结构化输入：args.reviews，保留原有样本身份字段。
         reviews={(r["dataset"],r["id"]):r for r in read_jsonl(args.reviews)}
         result=[]
         for r in read_jsonl(args.data):
@@ -164,6 +187,7 @@ def main(argv=None):
         write_jsonl(args.output,records); save(args.output+".budget.json",stats)
     elif args.command=="compare":
         from .evaluation import evaluate,diagnostic_score,paired_bootstrap
+        # 读取结构化输入：args.a，保留原有样本身份字段。
         data=read_jsonl(args.data); a=read_jsonl(args.a); b=read_jsonl(args.b)
         evaluate(a,data); evaluate(b,data)
         a={(p["dataset"],p["id"]):p for p in a}; b={(p["dataset"],p["id"]):p for p in b}
@@ -198,22 +222,29 @@ def main(argv=None):
     elif args.command=="demo": demo(args.output)
 
 
+# 校验输入及续跑身份，创建生成后端并逐题保存预测和计时。
+# 输入：args（已解析的命令参数）。
+# 相关调用：read_jsonl、digest、Path(args.config).read_text、meta.read_text。
+# 异常约束：Duplicate dataset/id in prediction input
 def predict_command(args):
     from .models import make_model
     from .experiments import settings
     from .inference import predict
     cfg=json.loads(Path(args.config).read_text(encoding="utf-8"))
+    # 读取结构化输入：args.data，保留原有样本身份字段。
     data=read_jsonl(args.data); keys=[(r["dataset"],r["id"]) for r in data]
     if len(keys)!=len(set(keys)): raise ValueError("Duplicate dataset/id in prediction input")
     run_metadata=metadata(cfg)
     identity=digest({"config":cfg,"data":data,"source_hash":run_metadata["source_hash"]})
     out=Path(args.output); meta=Path(str(out)+".meta.json")
     if out.exists() and not args.resume: raise ValueError("Output exists; use --resume with matching config/data")
+    # 读取结构化输入：out，保留原有样本身份字段。
     previous=read_jsonl(out) if out.exists() else []
     if args.resume and out.exists():
         if not meta.exists() or json.loads(meta.read_text(encoding="utf-8"))["identity"]!=identity:
             raise ValueError("Resume config or input changed")
     save(meta,{**run_metadata,"identity":identity,"data_hash":digest(data)})
+    # 按已读取配置构造生成后端，实际模型身份和预算由该配置登记。
     model=make_model(cfg["model_config"]); done={(r["dataset"],r["id"]) for r in previous}
     options=dict(cfg.get("settings",{})); mode=options.pop("mode",cfg.get("mode","B5")); s=settings(mode,**options)
     if cfg.get("benchmark") and cfg["model_config"].get("cache"):
@@ -233,6 +264,9 @@ def predict_command(args):
             f.write(json.dumps(result,ensure_ascii=False)+"\n"); f.flush()
 
 
+# 用明确的合成题与回放响应验证执行、蒸馏记录和报告数据流。
+# 输入：directory（数据或模型目录）。
+# 相关调用：write_jsonl。
 def demo(directory):
     from .data import example
     from .models import ReplayModel
@@ -251,7 +285,9 @@ def demo(directory):
          {"op":"select","mode":"extreme","column":"total","which":"max"},
          {"op":"answer","columns":["c1"]}]
     pred=predict(sample,ReplayModel([{"operations":ops}]),settings("A4"))
+    # 保存逐条结构化产物到 root / 'examples.jsonl'，供后续重放或审核读取。
     root=Path(directory); write_jsonl(root/"examples.jsonl",[sample]); write_jsonl(root/"predictions.jsonl",[pred])
+    # 保存逐条结构化产物到 root / 'records.jsonl'，供后续重放或审核读取。
     write_jsonl(root/"records.jsonl",build_records(sample,ops))
     save(root/"report.json",{"fixture_only":True,"metrics":evaluate([pred],[sample]),
          "compressed_operations":compress(TableState.from_table(sample["table"]),ops)})

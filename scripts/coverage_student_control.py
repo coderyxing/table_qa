@@ -1,3 +1,5 @@
+# 脚本用途：重跑保留全部原始训练记录的 B2/B5 开发对照，审计实际曝光。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Development-only B2/B5 rerun retaining every original training record."""
 import gc
 import json
@@ -16,21 +18,26 @@ from tableqa.experiments import settings
 
 source=Path('runs/medium-development/students');root=Path('runs/coverage-student-control/results')
 if root.exists():raise ValueError('Output exists; preserve it and inspect before rerunning')
+# 读取结构化输入：source / 'accepted-samples.jsonl'，保留原有样本身份字段。
 original=read_jsonl(source/'accepted-samples.jsonl');keys=set(index_records(original,'source'))
+# 读取结构化输入：source / 'validation-samples.jsonl'，保留原有样本身份字段。
 validation=read_jsonl(source/'validation-samples.jsonl')
 if any(s['split']!='validation' for s in validation):raise ValueError('Only the existing source validation protocol is allowed')
 cfg=json.loads((source/'B2/run.json').read_text())['config']
 if cfg!=json.loads((source/'B5/run.json').read_text())['config']:raise ValueError('Legacy configs differ')
 cfg={**cfg,'sampling_policy':'coverage'}
+# 使用本阶段指定的 tokenizer；预算、提示模板与监督掩码应沿用同一版本。
 tokenizer=AutoTokenizer.from_pretrained(cfg['model'],local_files_only=True)
 prepared={};records={}
 for mode in ['B2','B5']:
+    # 读取结构化输入：source / f'{mode}-records.jsonl'，保留原有样本身份字段。
     records[mode]=read_jsonl(source/f'{mode}-records.jsonl')
     if {tuple((r['dataset'],r['id'])) for r in records[mode]}!=keys:raise ValueError('Raw source pools differ')
     encoded,stats=prepare_training_data(cfg,records[mode],tokenizer)
     if {r['source_key'] for r in encoded}!=keys:raise ValueError('Coverage policy lost a source sample')
     prepared[mode]=stats
 root.mkdir(parents=True)
+# 保存逐条结构化产物到 root / 'validation-samples.jsonl'，供后续重放或审核读取。
 write_jsonl(root/'validation-samples.jsonl',validation)
 (root/'preflight.json').write_text(json.dumps(prepared,indent=2))
 (root/'protocol.json').write_text(json.dumps({'development_only':True,'change':'coverage-preserving kind balancing',
@@ -42,13 +49,16 @@ report={'development_only':True,'models':{}}
 for mode in ['B2','B5']:
     directory=root/mode;directory.mkdir()
     (directory/'run.json').write_text(json.dumps(metadata(cfg),indent=2))
+    # 执行当前配置的训练阶段，输出检查点与实际训练记录统计。
     torch.cuda.reset_peak_memory_stats();statistics=train(cfg,records[mode],directory/'adapter')
     if statistics['source_samples_after_alignment']!=len(keys):raise ValueError('Actual source coverage differs')
     gc.collect();torch.cuda.empty_cache()
     backend=LocalModel(cfg['model'],adapter=str(directory/'adapter'),max_new_tokens=512,max_input_tokens=4096,seed=42)
     predictions=[]
     for sample in validation:
+        # 对当前样本运行完整推理入口，返回值包含答案、状态、错误和调用成本。
         predictions.append(predict(sample,backend,settings(mode)))
+        # 保存逐条结构化产物到 directory / 'validation-predictions.jsonl'，供后续重放或审核读取。
         write_jsonl(directory/'validation-predictions.jsonl',predictions)
     report['models'][mode]={'training':statistics}
     (root/'report.json').write_text(json.dumps(report,indent=2))

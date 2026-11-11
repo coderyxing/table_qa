@@ -1,3 +1,5 @@
+# 脚本用途：从官方归档提取数据成员，核对提取路径与完成状态。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Extract data-only members from complete official repository archives."""
 import hashlib
 import json

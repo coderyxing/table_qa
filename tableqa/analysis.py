@@ -1,3 +1,5 @@
+# 模块职责：对完整或正在写入的预测做来源绑定、官方判分导入和配对统计，输出可追溯的开发报告。
+# 接口约定：样本、操作和结果采用本项目的结构化字典；细节见各入口及字段检查。
 """Paired, failure-inclusive analysis. Standard library only; no GPU calls."""
 from collections import Counter
 import csv
@@ -11,6 +13,9 @@ from .data import digest
 DIRECT={'A0','A1','B0','B1'}
 
 
+# 读取 JSONL 的完整行，正在写入的尾行保持原样，以便安全观察运行进度。
+# 输入：path（输入或输出路径）。
+# 返回形式含：records。
 def read_completed_prefix(path):
     """A live writer may be midway through its last JSONL record. Never edit it."""
     records=[]
@@ -21,6 +26,9 @@ def read_completed_prefix(path):
     return records
 
 
+# 按数据集与样本 ID 建索引，提前拒绝会覆盖结果的重复键。
+# 输入：records（规范记录序列）；description。
+# 返回形式含：result。
 def index_records(records,description):
     result={}
     for record in records:
@@ -30,6 +38,9 @@ def index_records(records,description):
     return result
 
 
+# 按失败消息归类可观测的格式、执行或预算问题，供错误分布统计。
+# 输入：prediction（单条预测或教师轨迹）。
+# 返回形式含：'other_failure' / category。
 def failure_category(prediction):
     failure=prediction.get('failure') or {}
     text=f"{failure.get('type','')} {failure.get('message','')}".casefold()
@@ -47,6 +58,10 @@ def failure_category(prediction):
     return 'other_failure'
 
 
+# 核验预测覆盖、方法一致性及计时字段，再进入汇总统计。
+# 输入：samples（固定样本集合）；predictions（完整预测集合）；allow_partial。
+# 返回形式含：3 项组成的结果。
+# 异常约束：Unknown prediction IDs
 def validate_run(samples,predictions,allow_partial=False):
     refs=index_records(samples,'sample'); preds=index_records(predictions,'prediction')
     if set(preds)-set(refs): raise ValueError('Unknown prediction IDs')
@@ -60,10 +75,17 @@ def validate_run(samples,predictions,allow_partial=False):
     return refs,preds,missing
 
 
+# 对固定排序后的结构记录求摘要，用于绑定当前输入和判分产物。
+# 输入：records（规范记录序列）。
+# 相关调用：digest。
 def record_hash(records):
     return digest(sorted(records,key=lambda r:(r['dataset'],r['id'])))
 
 
+# 读取与本轮样本及预测哈希匹配的官方逐题分数。
+# 输入：report；expected_keys；samples（固定样本集合）；predictions（完整预测集合）。
+# 返回形式含：result / None。
+# 异常约束：Official WTQ score coverage differs from predictions
 def official_lookup(report,expected_keys,samples,predictions):
     if report is None: return None
     rows=report['scores']; result={}
@@ -81,6 +103,9 @@ def official_lookup(report,expected_keys,samples,predictions):
     return result
 
 
+# 优先采用已核验的官方分数，按任务选择可解释的主指标。
+# 输入：prediction（单条预测或教师轨迹）；sample（规范样本记录）；official。
+# 返回形式含：0.0。
 def primary_score(prediction,sample,official=None):
     if prediction['status']!='ok': return 0.
     if sample['dataset']=='wikitq' and official is not None:
@@ -88,12 +113,19 @@ def primary_score(prediction,sample,official=None):
     return diagnostic_score(prediction,sample)
 
 
+# 为各任务的官方或诊断分数生成明确名称。
+# 输入：dataset；official。
+# 返回形式含：'DIAGNOSTIC_token_F1_NOT_factual_consistency' / 'label_accuracy'。
 def metric_name(dataset,official):
     if dataset=='wikitq': return 'official_denotation_accuracy' if official is not None else 'DIAGNOSTIC_normalized_set_match'
     if dataset=='tabfact': return 'label_accuracy'
     return 'DIAGNOSTIC_token_F1_NOT_factual_consistency'
 
 
+# 对一组完整预测汇总质量、执行、失败、token 和延迟。
+# 输入：samples（固定样本集合）；predictions（完整预测集合）；official_report；allow_partial。
+# 返回形式含：字段 partial、missing_count、rows、samples_structured_sha256、predictions_structured_sha256、interpretation。
+# 异常约束：One run cannot mix inference modes within a task
 def summarize_run(samples,predictions,official_report=None,allow_partial=False):
     refs,preds,missing=validate_run(samples,predictions,allow_partial)
     official=official_lookup(official_report,{k for k in preds if k[0]=='wikitq'},samples,predictions)
@@ -142,6 +174,10 @@ def summarize_run(samples,predictions,official_report=None,allow_partial=False):
             'interpretation':'Development results when split=train; partial observed scores are not whole-run scores.'}
 
 
+# 按相同样本配对两组结果，计算差值区间及条件允许的延迟比。
+# 输入：samples（固定样本集合）；predictions_a；predictions_b；official_a；official_b；repeats（重采样次数）。
+# 返回形式含：output。
+# 异常约束：Both methods must use the same WTQ scoring protocol
 def compare_runs(samples,predictions_a,predictions_b,official_a=None,official_b=None,repeats=2000):
     refs,a,_=validate_run(samples,predictions_a); _,b,_=validate_run(samples,predictions_b)
     wtq={k for k in refs if k[0]=='wikitq'}
@@ -167,6 +203,9 @@ def compare_runs(samples,predictions_a,predictions_b,official_a=None,official_b=
     return output
 
 
+# 将同一分析对象输出为 JSON、表格和 Markdown 以供复核。
+# 输入：directory（数据或模型目录）；summaries；comparisons。
+# 相关调用：(root / 'analysis.json').write_text、(root / 'report.md').write_text。
 def write_analysis(directory,summaries,comparisons=None):
     root=Path(directory); root.mkdir(parents=True,exist_ok=True)
     payload={'runs':summaries,'paired_comparisons':comparisons or []}

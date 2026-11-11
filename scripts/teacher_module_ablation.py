@@ -1,3 +1,5 @@
+# 脚本用途：固定 32B 教师及解码条件，记录依赖、证据、修复开关的逐题差异。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Fixed 32B teacher: dependency/evidence/repair development ablations.
 
 Tests existing executable-constraint kernel, not the separate question-contract
@@ -20,26 +22,46 @@ from tableqa.analysis import summarize_run,compare_runs
 from tableqa.reporting import freeform_metrics,compare_freeform
 
 
+# 读取指定结构化产物，交由当前阶段核验来源和配置。
+# 输入：p。
+# 相关调用：Path(p).read_text。
 def load(p):return json.loads(Path(p).read_text(encoding='utf-8'))
+# 创建输出目录并保存当前阶段的结构化产物。
+# 输入：p；v。
+# 相关调用：Path(p).write_text。
 def save(p,v):Path(p).write_text(json.dumps(v,ensure_ascii=False,indent=2),encoding='utf-8')
+# 计算文件或产物内容摘要，供模型、输入和协议绑定。
+# 输入：p。
+# 相关调用：hashlib.sha256(Path(p).read_bytes()).hexdigest。
 def sha(p):return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 
 
+# EvidenceExposureCounter：包装真实教师调用，统计证据字段进入提示的次数与范围。
 class EvidenceExposureCounter:
+    # 初始化 EvidenceExposureCounter 的依赖及持久状态；具体预算和身份字段见赋值。
+    # 输入：model（生成后端）。
     def __init__(self, model):
         self.model = model
         self.exposed_calls = 0
 
+    # 按当前适配接口生成或重放响应，同时保留调用所需的观测状态。
+    # 输入：messages（模型可见消息）。
+    # 相关调用：self.model.generate。
     def generate(self, messages):
         if json.loads(messages[1]["content"]).get("original_evidence_cells"):
             self.exposed_calls += 1
         return self.model.generate(messages)
 
 
+# 解析当前脚本参数，按模块说明执行本次冻结阶段并保存产物。
+# 相关调用：read_jsonl、(root / 'STARTED').write_text、(root / 'report.md').write_text、(root / 'COMPLETE').write_text。
+# 异常约束：Preserve existing teacher attempt; inspect before recovery
 def main():
+    # 定义本入口的参数解析器；位置参数、默认值和允许取值由相邻 add_argument 明确声明。
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('action',choices=['prepare','run']);parser.add_argument('output');args=parser.parse_args();root=Path(args.output)
     if args.action=='prepare':
         if root.exists():raise ValueError('Preserve frozen teacher protocol')
+        # 读取结构化输入：'runs/joint-core-20261107/prepared/samples.jsonl'，保留原有样本身份字段。
         rows=read_jsonl('runs/joint-core-20261107/prepared/samples.jsonl')
         short=[s for s in rows if s['dataset']!='fetaqa'];freeform=sorted([s for s in rows if s['dataset']=='fetaqa'],key=lambda s:s['id'])
         random.Random(2040).shuffle(freeform);samples=short+freeform[:20];random.Random(2041).shuffle(samples)
@@ -57,14 +79,17 @@ def main():
             'limits':['Existing dependency check is block-local program consistency, not full question semantics.',
                       'Ablation of an existing kernel is not evidence that its components are novel.',
                       '60 previously used development cases; no formal test/SOTA or human factuality claim.']}
+        # 保存逐条结构化产物到 root / 'samples.jsonl'，供后续重放或审核读取。
         root.mkdir(parents=True);write_jsonl(root/'samples.jsonl',samples);save(root/'protocol.json',protocol);save(root/'run.json',metadata(protocol));print('TEACHER_ABLATION_FROZEN',digest(samples),flush=True);return
     if (root/'STARTED').exists():raise ValueError('Preserve existing teacher attempt; inspect before recovery')
+    # 读取结构化输入：root / 'samples.jsonl'，保留原有样本身份字段。
     protocol=load(root/'protocol.json');samples=read_jsonl(root/'samples.jsonl')
     if digest(samples)!=protocol['samples_sha256'] or metadata({})['source_hash']!=load(root/'run.json')['source_hash']:raise ValueError('Frozen code/input changed')
     if not Path('runs/joint-core-20261107/QUEUE_COMPLETE').is_file():raise ValueError('Student queue must release GPUs first')
     import torch
     if torch.cuda.device_count()!=2 or any(torch.cuda.mem_get_info(i)[0]<40*1024**3 for i in [0,1]):
         raise RuntimeError('Two idle A40s with >=40 GiB free each are required; do not stop other jobs')
+    # 按已读取配置构造生成后端，实际模型身份和预算由该配置登记。
     (root/'STARTED').write_text('fixed teacher ablations started\n');model=make_model(protocol['model_config'])
     if getattr(model.model,'peft_config',None):raise ValueError('Teacher must not load an adapter')
     outputs={name:[] for name in protocol['conditions']};names=list(outputs)
@@ -78,9 +103,11 @@ def main():
             config={**protocol['settings'],**protocol['conditions'][name]};mode=config.pop('mode')
             if evidence_study:
                 model.exposed_calls = 0
+            # 对当前样本运行完整推理入口，返回值包含答案、状态、错误和调用成本。
             row=predict(sample,model,settings(mode,**config));row['metrics']['latency_comparable']=False
             if evidence_study:
                 row['metrics']['readable_evidence_calls'] = model.exposed_calls
+            # 保存逐条结构化产物到 root / f'{name}-predictions.jsonl'，供后续重放或审核读取。
             outputs[name].append(row);write_jsonl(root/f'{name}-predictions.jsonl',outputs[name])
             save(root/'progress.json',{'counts':{k:len(v) for k,v in outputs.items()},'expected_each':sample_count})
             print('TEACHER_ABLATION',name,i+1,sample_count,row['status'],flush=True)

@@ -1,8 +1,13 @@
+# 模块职责：把实验组名转换为明确推理开关，并生成带预算、种子和划分约束的实验清单。
+# 接口约定：样本、操作和结果采用本项目的结构化字典；细节见各入口及字段检查。
 """Executable experiment settings and bounded one-factor manifest generation."""
 from dataclasses import asdict
 from .inference import Settings,compact_state
 
 
+# 由实验模式设置默认开关，再严格检查显式覆盖参数。
+# 输入：mode（实验模式）；**overrides。
+# 返回形式含：cfg。
 def settings(mode, **overrides):
     cfg = Settings(mode=mode)
     cfg.compact = compact_state(mode)
@@ -15,8 +20,12 @@ def settings(mode, **overrides):
     return cfg
 
 
+# 枚举主实验、消融、迁移和参数扫描规格，元数据与推理设置分开保存。
+# 返回形式含：runs。
 def manifest():
     runs=[]
+    # 登记一条实验规格，把外层元数据和推理覆盖设置分别保存。
+    # 输入：family；mode（实验模式）；model（生成后端）；seed（随机种子）；datasets；**kwargs。
     def add(family, mode="B5", model="3B", seed=42, datasets=None, **kwargs):
         runs.append({"family":family,"mode":mode,"student_size":model,"seed":seed,
                      "datasets":datasets or ["wikitq","tabfact","fetaqa"],**kwargs})

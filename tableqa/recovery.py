@@ -1,3 +1,5 @@
+# 模块职责：把主操作模型与失败回退模型按固定规则组合，完整计入恢复开销。
+# 接口约定：样本、操作和结果采用本项目的结构化字典；细节见各入口及字段检查。
 """Failure-only answer fallback. A fallback is never an executable evidence chain."""
 from copy import deepcopy
 import time
@@ -5,6 +7,10 @@ from .experiments import settings as inference_settings
 from .inference import predict
 
 
+# 合并主预测与按规则触发的回退预测，同时累计两个阶段成本。
+# 输入：primary；fallback；elapsed。
+# 返回形式含：result。
+# 异常约束：Primary must be an operation model
 def combine_recovery(primary, fallback=None, elapsed=None):
     if primary['mode'] in {'A0','A1','B0','B1'}:raise ValueError('Primary must be an operation model')
     if fallback is not None:
@@ -37,6 +43,9 @@ def combine_recovery(primary, fallback=None, elapsed=None):
     return result
 
 
+# 先运行主方法，满足冻结的失败条件时调用指定回退后端。
+# 输入：sample（规范样本记录）；primary_model；fallback_model；settings（推理开关与预算）。
+# 返回形式含：2 项组成的结果。
 def predict_with_recovery(sample,primary_model,fallback_model,settings):
     start=time.perf_counter()
     primary=predict(sample,primary_model,settings)

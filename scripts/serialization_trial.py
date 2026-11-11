@@ -1,3 +1,5 @@
+# 脚本用途：在预先登记的训练题上比较不同的无损输入序列化方式。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Small, preregistered training-only format trial after the main batch finishes."""
 import json
 from pathlib import Path
@@ -16,13 +18,16 @@ baseline_code=Path('runs/medium-development/frozen-code/tableqa')
 for name in ['core.py','inference.py','models.py','experiments.py']:
     if (implementation/name).read_bytes()!=(baseline_code/name).read_bytes():
         raise ValueError(f'Baseline/candidate implementation differs beyond serialization: {name}')
+# 读取结构化输入：'runs/medium-development/samples.jsonl'，保留原有样本身份字段。
 source=read_jsonl('runs/medium-development/samples.jsonl'); selected=[]
 for dataset in ['wikitq','tabfact','fetaqa']:
     pool=sorted([r for r in source if r['dataset']==dataset],key=lambda r:r['id'])
     random.Random(2027).shuffle(pool); selected+=pool[:10]
 keys={(r['dataset'],r['id']) for r in selected}
+# 读取结构化输入：'runs/medium-development/A4-predictions.jsonl'，保留原有样本身份字段。
 baseline=[r for r in read_jsonl('runs/medium-development/A4-predictions.jsonl') if (r['dataset'],r['id']) in keys]
 if len(baseline)!=len(selected): raise ValueError('Prerequisite baseline coverage incomplete')
+# 保存逐条结构化产物到 root / 'samples.jsonl'，供后续重放或审核读取。
 write_jsonl(root/'samples.jsonl',selected); write_jsonl(root/'dictionary-predictions.jsonl',baseline)
 config={'model':str(Path('models/Qwen2.5-32B-Instruct').resolve()),'device_map':'balanced',
         'max_input_tokens':4096,'max_new_tokens':1024,'seed':2026}
@@ -34,6 +39,8 @@ config={'model':str(Path('models/Qwen2.5-32B-Instruct').resolve()),'device_map':
 backend=ArrayInputModel(LocalModel(config['model'],device_map='balanced',seed=2026))
 predictions=[]
 for sample in selected:
+    # 对当前样本运行完整推理入口，返回值包含答案、状态、错误和调用成本。
     p=predict(sample,backend,settings('A4')); p['input_representation']='array'
+    # 保存逐条结构化产物到 root / 'array-predictions.jsonl'，供后续重放或审核读取。
     predictions.append(p); write_jsonl(root/'array-predictions.jsonl',predictions)
 print('SERIALIZATION_TRIAL_COMPLETE',len(predictions),flush=True)

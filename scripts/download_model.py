@@ -1,3 +1,5 @@
+# 脚本用途：从 ModelScope 元数据下载公开 Qwen 文件，逐文件验证大小与 SHA-256。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Download public Qwen files from ModelScope with per-file SHA256 checking.
 
 Uses curl for network and standard library for verification. Never executes repo code.
@@ -12,6 +14,9 @@ import subprocess
 from urllib.parse import quote
 
 
+# 计算文件或产物内容摘要，供模型、输入和协议绑定。
+# 输入：path（输入或输出路径）。
+# 相关调用：h.hexdigest。
 def sha(path):
     h=hashlib.sha256()
     with path.open('rb') as f:
@@ -19,7 +24,11 @@ def sha(path):
     return h.hexdigest()
 
 
+# 解析当前脚本参数，按模块说明执行本次冻结阶段并保存产物。
+# 相关调用：(root / 'DOWNLOAD_COMPLETE').write_text、manifest.write_text、manifest.read_text。
+# 异常约束：Only public Qwen models enabled
 def main():
+    # 定义本入口的参数解析器；位置参数、默认值和允许取值由相邻 add_argument 明确声明。
     p=argparse.ArgumentParser(); p.add_argument('model'); p.add_argument('output'); p.add_argument('--metadata-only',action='store_true'); args=p.parse_args()
     if not args.model.startswith('Qwen/'): raise ValueError('Only public Qwen models enabled')
     root=Path(args.output).resolve(); root.mkdir(parents=True,exist_ok=True)

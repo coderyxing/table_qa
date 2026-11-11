@@ -1,3 +1,5 @@
+# 模块职责：在重放等价和反馈边界约束下搜索教师链子序列，再用状态成本规划离线分块。
+# 接口约定：样本、操作和结果采用本项目的结构化字典；细节见各入口及字段检查。
 """Training-time deletion search and state-cost partitioning, never a test oracle."""
 from copy import deepcopy
 from itertools import combinations
@@ -6,6 +8,10 @@ import math
 from .core import TableState, run_plan, ExecutionError
 
 
+# 在训练记录使用外部候选前，核对其子序列关系、反馈保护及重放等价。
+# 输入：state（当前执行状态）；operations（白名单操作序列）；candidate（待核验候选）。
+# 相关调用：run_plan(state, operations)[0].signature、run_plan(state, candidate)[0].signature、run_plan。
+# 异常约束：Prepared operations removed a feedback boundary
 def verify_subsequence_rewrite(state, operations, candidate):
     """Validate externally prepared targets before the record builder uses them."""
     cursor=0
@@ -19,6 +25,11 @@ def verify_subsequence_rewrite(state, operations, candidate):
         raise ValueError('Prepared operations changed execution/provenance')
 
 
+# 有界枚举较短子序列，选择保持完整状态签名及受保护操作的候选。
+# 输入：state（当前执行状态）；operations（白名单操作序列）；max_candidates；preserve_kinds。
+# 相关调用：run_plan、run_plan(state, best)[0].signature。
+# 返回形式含：2 项组成的结果。
+# 异常约束：Positive integer candidate budget required
 def optimize_operations(state, operations, max_candidates=4096, preserve_kinds=()):
     """Minimize length within subsequences that preserve the full execution signature.
 
@@ -65,6 +76,9 @@ def optimize_operations(state, operations, max_candidates=4096, preserve_kinds=(
                   'limits': 'Equality on this table, not natural-language semantic proof or unrestricted program optimality.'}
 
 
+# 生成与监督记录实际行为一致的固定分块对照，单独处理答案目标。
+# 输入：operations（白名单操作序列）；max_size（最大操作块长）。
+# 返回形式含：out。
 def effective_fixed_blocks(operations, max_size=4):
     """The fixed control after separating answer supervision, as build_records does."""
     from .distillation import blocks
@@ -77,6 +91,11 @@ def effective_fixed_blocks(operations, max_size=4):
     return out
 
 
+# 在离线教师链的可行块图上做最短路径，优化加权 token 代理成本。
+# 输入：sample（规范样本记录）；operations（白名单操作序列）；tokenizer（学生分词器）；max_size（最大操作块长）；max_length（序列 token 上限）；input_weight；output_weight；call_overhead；state_sensitive；allow_validation；max_output_tokens；typed_quantities；semantic_extract；tool_demonstrations。
+# 相关调用：run_plan。
+# 返回形式含：2 项组成的结果。
+# 异常约束：Quantity partition requires the matching typed_quantities prompt
 def state_cost_partition(sample, operations, tokenizer, max_size=4, max_length=4096,
                          input_weight=1., output_weight=1., call_overhead=128.,
                          state_sensitive=True, allow_validation=False, max_output_tokens=512,
@@ -109,6 +128,8 @@ def state_cost_partition(sample, operations, tokenizer, max_size=4, max_length=4
     run_plan(states[0], operations)
     n = len(operations); edges = {}
     for i in range(n):
+        # 按当前状态和聊天模板计算该候选块的输入成本。
+        # 输入：view_state。
         def input_tokens(view_state):
             messages = [{'role':'system','content':system_prompt('B5', typed_quantities, semantic_extract,
                         tool_demonstrations)}, {'role':'user','content':

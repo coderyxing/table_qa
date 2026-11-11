@@ -1,3 +1,5 @@
+# 脚本用途：重放已知的类型及行域失败，并保存人工设计后缀的离线修复。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Reproduce and repair two known type/scope failures with hand-written operations."""
 
 import argparse
@@ -10,17 +12,24 @@ from tableqa.inference import parse
 from tableqa.quantities import quantity_text
 
 
+# 解析当前脚本参数，按模块说明执行本次冻结阶段并保存产物。
+# 相关调用：args.output.write_text、run_plan、read_jsonl、digest。
+# 异常约束：Preserve the existing replay report
 def main():
+    # 定义本入口的参数解析器；位置参数、默认值和允许取值由相邻 add_argument 明确声明。
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stage", type=Path)
     parser.add_argument("output", type=Path)
+    # 解析本次命令的实际参数，后续样本路径和实验开关均由此确定。
     args = parser.parse_args()
     if args.output.exists():
         raise ValueError("Preserve the existing replay report")
 
     keys = {("tabfact", "2-18823880-1.html.csv:9"), ("wikitq", "nt-11054")}
+    # 读取结构化输入：args.stage / 'samples.jsonl'，保留原有样本身份字段。
     samples = {(r["dataset"], r["id"]): r for r in read_jsonl(args.stage / "samples.jsonl")
                if (r["dataset"], r["id"]) in keys}
+    # 读取结构化输入：args.stage / 'B5/predictions.jsonl'，保留原有样本身份字段。
     predictions = {(r["dataset"], r["id"]): r for r in read_jsonl(args.stage / "B5/predictions.jsonl")
                    if (r["dataset"], r["id"]) in keys}
     if set(samples) != keys or set(predictions) != keys:
@@ -53,6 +62,7 @@ def main():
             exclude_retired = {"op": "filter", "column": "c0", "cmp": "ne", "value": "Ret", "type": "text"}
             revised = [old[0], exclude_retired, *old[1:]]
             terminal = {"op": "answer", "columns": ["c1"]}
+        # 在明确给出的表状态上重放操作链，核对执行结果和来源追踪。
         before_answer, trace = run_plan(initial, revised)
         result, _ = run_plan(before_answer, [terminal])
         if result.answer != sample["reference"]:

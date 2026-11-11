@@ -1,3 +1,5 @@
+# 脚本用途：在相同提示下比较 P/R/M 模型的开发题和合成新实例。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Same-prompt P/R/M evaluation on frozen development and synthetic instances."""
 import argparse
 from collections import Counter
@@ -19,13 +21,19 @@ from tableqa.quantities import uses_quantities
 from tableqa.semantic_columns import uses_extraction
 
 
+# 解析当前脚本参数，按模块说明执行本次冻结阶段并保存产物。
+# 相关调用：(root / 'run.json').write_text、(root / 'report.json').write_text、(root / 'report.md').write_text、(stage.parent / 'COMPLETE').write_text。
+# 异常约束：Evaluation exists; preserve all outputs
 def main():
+    # 定义本入口的参数解析器；位置参数、默认值和允许取值由相邻 add_argument 明确声明。
     parser=argparse.ArgumentParser(description=__doc__); parser.add_argument('stage')
+    # 解析本次命令的实际参数，后续样本路径和实验开关均由此确定。
     args=parser.parse_args(); stage=Path(args.stage).resolve(); root=stage.parent/'evaluation'
     if root.exists(): raise ValueError('Evaluation exists; preserve all outputs')
     protocol=json.loads((stage/'protocol.json').read_text())
     frozen=json.loads((stage/'run.json').read_text())
     if metadata({})['source_hash']!=frozen['source_hash']: raise ValueError('Evaluation module code changed')
+    # 读取结构化输入：stage / 'development-samples.jsonl'，保留原有样本身份字段。
     samples={'development':read_jsonl(stage/'development-samples.jsonl'),
              'synthetic':read_jsonl(stage/'synthetic-probe.jsonl')}
     if digest(samples['development'])!=protocol['development']['sha256'] or digest(samples['synthetic'])!=protocol['synthetic_probe']['sha256']:
@@ -38,6 +46,7 @@ def main():
         if not (stage.parent/f'training-{condition}'/'COMPLETE').exists():
             raise ValueError('Both controlled training runs must complete first')
     root.mkdir(); (root/'run.json').write_text(json.dumps(metadata(protocol),indent=2))
+    # 保存逐条结构化产物到 root / f'{kind}-samples.jsonl'，供后续重放或审核读取。
     for kind,rows in samples.items(): write_jsonl(root/f'{kind}-samples.jsonl',rows)
     infer_settings=dict(protocol['inference_settings']); mode=infer_settings.pop('mode')
     outputs={}
@@ -45,12 +54,14 @@ def main():
     for name in ['P','R','M']:
         adapter=initial if name=='P' else stage.parent/f'training-{name}'/'adapter'
         model_config={**protocol['model_config'],'adapter':str(adapter)}
+        # 按已读取配置构造生成后端，实际模型身份和预算由该配置登记。
         model=make_model(model_config); outputs[name]={}; out=root/name; out.mkdir()
         (out/'config.json').write_text(json.dumps({'model_config':model_config,'settings':protocol['inference_settings']},indent=2))
         for kind,rows in samples.items():
             predictions=[]
             with (out/f'{kind}-predictions.jsonl').open('w',encoding='utf-8') as stream:
                 for i,sample in enumerate(rows):
+                    # 对当前样本运行完整推理入口，返回值包含答案、状态、错误和调用成本。
                     result=predict(sample,model,settings(mode,**infer_settings))
                     result['metrics']['latency_comparable']=False
                     result['extraction_used']=uses_extraction(result['operations'])

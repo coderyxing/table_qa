@@ -1,3 +1,5 @@
+# 模块职责：提供双章实验专用命令，固定数据与模型版本，执行教师采集、学生重放和正式报告。
+# 接口约定：样本、操作和结果采用本项目的结构化字典；细节见各入口及字段检查。
 """Reproducible entry points for the parallel thesis experiments."""
 import argparse
 from importlib.metadata import version
@@ -11,16 +13,27 @@ from .longtable import INPUT_LIMIT, Protocol, complete_input_tokens, predict_lon
 from .models import make_model
 
 
+# 按 UTF-8 加载配置或冻结协议。
+# 输入：path（输入或输出路径）。
+# 相关调用：Path(path).read_text。
 def read_json(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+# 从本地固定路径加载学生 tokenizer，用于预算和监督重放。
+# 输入：path（输入或输出路径）。
+# 相关调用：AutoTokenizer.from_pretrained。
 def tokenizer(path):
     from transformers import AutoTokenizer
 
+    # 使用本阶段指定的 tokenizer；预算、提示模板与监督掩码应沿用同一版本。
     return AutoTokenizer.from_pretrained(path, local_files_only=True)
 
 
+# 读取生成配置并拒绝响应缓存，维护实验计时与生成条件。
+# 输入：path（输入或输出路径）。
+# 返回形式含：cfg。
+# 异常约束：These experiments require uncached responses
 def model_config(path):
     cfg = read_json(path)
     if cfg.get("cache"):
@@ -28,6 +41,9 @@ def model_config(path):
     return cfg
 
 
+# 按固定官方版本准备三项划分，为每张完整表登记内容指纹。
+# 输入：args（已解析的命令参数）。
+# 相关调用：write_jsonl。
 def prepare_databench(args):
     from datasets import load_dataset
 
@@ -45,13 +61,20 @@ def prepare_databench(args):
             rows.append({"id": f"{published}:{i}", "dataset": "databench", "split": split, "task": "short",
                          "table_id": table_id, "table_fingerprint": fingerprints[table_id],
                          "question": row["question"], "reference": row["answer"], "semantic": row["type"]})
+        # 保存逐条结构化产物到 root / f'{split}.jsonl'，供后续重放或审核读取。
         write_jsonl(root / f"{split}.jsonl", rows)
     save(root / "dataset.json", {"dataset": "cardiffnlp/databench", "subset": "semeval",
                                  "revision": args.revision, "table_fingerprints": fingerprints})
 
 
+# 校验第三章条件声明及复核触发报告，逐题运行教师对照并保存元数据。
+# 输入：args（已解析的命令参数）。
+# 相关调用：write_jsonl、read_jsonl、digest。
+# 异常约束：Duplicate condition declarations
 def predict3(args):
+    # 读取结构化输入：args.data，保留原有样本身份字段。
     data, cfg = read_jsonl(args.data), model_config(args.config)
+    # 读取结构化输入：args.declarations，保留原有样本身份字段。
     declarations = read_jsonl(args.declarations) if args.declarations else []
     by_id = {(r["dataset"], r["id"]): r for r in declarations}
     if len(by_id) != len(declarations):
@@ -62,13 +85,16 @@ def predict3(args):
             raise ValueError("Second-stage review requires a positive frozen development gate and reviewer")
         gate = read_json(args.gate)
         if (gate.get("run_llm_review") is not True or gate.get("split") != "validation"
-                or gate.get("threshold") != chapter3.REVIEW_THRESHOLD):
+                or gate.get("threshold") != chapter3.REVIEW_THRESHOLD
+                or gate.get("groups", {}).get("row_domains", {}).get("review_complete") is not True):
             raise ValueError("Development review threshold was not met")
         review_cfg = model_config(args.reviewer)
     if args.group not in {"fixed", "dynamic"} and args.declarations is None:
         raise ValueError("Supply reference-free condition declarations for checked groups")
+    # 按已读取配置构造生成后端，实际模型身份和预算由该配置登记。
     model = make_model(cfg)
     reviewer = make_model(review_cfg) if review_cfg else None
+    # 保存逐条结构化产物到 args.output，供后续重放或审核读取。
     write_jsonl(args.output, (
         chapter3.teacher_prediction(s, model, args.group, by_id.get((s["dataset"], s["id"]), {}), reviewer)
         for s in data
@@ -78,6 +104,10 @@ def predict3(args):
                                      "review_gate_hash": digest(gate) if review_cfg else None})
 
 
+# 让教师只读取题面和原表抽取条件，由程序绑定引文并保留未解析记录。
+# 输入：args（已解析的命令参数）。
+# 相关调用：read_jsonl、write_jsonl、digest、model.generate。
+# 异常约束：Invalid condition declaration
 def declare3(args):
     from .inference import parse
 
@@ -98,6 +128,9 @@ def declare3(args):
         'Always include "unresolved": true if a condition cannot be declared, otherwise false.'
     )
 
+    # 逐题抽取题面条件，保留无法解析的原始错误及使用量。
+    # 相关调用：model.generate。
+    # 异常约束：Invalid condition declaration
     def declarations():
         for s in data:
             prompt = [{"role": "system", "content": instruction},
@@ -121,6 +154,10 @@ def declare3(args):
     save(f"{args.output}.meta.json", {**metadata(cfg), "data_hash": digest(data)})
 
 
+# 按第四章组别核对底座与适配器，统一上下文和生成预算。
+# 输入：args（已解析的命令参数）。
+# 返回形式含：2 项组成的结果。
+# 异常约束：L1 uses the unmodified base model
 def _prediction4_config(args):
     cfg = model_config(args.config)
     protocol = Protocol(args.group, args.ablation)
@@ -133,6 +170,8 @@ def _prediction4_config(args):
     return cfg, protocol
 
 
+# 按表排序读取样本，在同一原表的相邻题目之间复用已核验的矩阵。
+# 输入：data（规范样本或输入数据）；directory（数据或模型目录）。
 def _materialized(data, directory):
     current = None
     table = None
@@ -144,6 +183,10 @@ def _materialized(data, directory):
         yield {**row, "table": table}
 
 
+# 运行完整 DataBench 预测或有界训练教师试跑，记录整表输入长度和来源。
+# 输入：args（已解析的命令参数）。
+# 相关调用：read_jsonl、write_jsonl、digest。
+# 异常约束：Expected DataBench samples; teacher acquisition uses the training split
 def predict4(args):
     cfg, protocol = _prediction4_config(args)
     data = read_jsonl(args.data)
@@ -157,6 +200,7 @@ def predict4(args):
     model, tok = make_model(cfg), tokenizer(args.tokenizer)
     rows = data[:args.limit] if args.limit else data
 
+    # 逐题生成并产出预测，使调用层可以流式保存。
     def predictions():
         for sample in _materialized(rows, args.tables):
             result = predict_longtable(sample, model, tok, protocol)
@@ -168,6 +212,10 @@ def predict4(args):
                                      "tokenizer": str(Path(args.tokenizer).resolve()), "teacher": args.teacher})
 
 
+# 重放学生真实失败的可见前缀，再由教师生成可审核修订。
+# 输入：args（已解析的命令参数）。
+# 相关调用：read_jsonl、write_jsonl、digest、teacher.generate。
+# 异常约束：Repair acquisition uses the complete L4 protocol
 def repair4(args):
     cfg, protocol = _prediction4_config(args)
     if protocol != Protocol("L4"):
@@ -175,9 +223,13 @@ def repair4(args):
     data = read_jsonl(args.data)
     if any(s["split"] != "train" or s["dataset"] != "databench" for s in data):
         raise ValueError("Repair acquisition must use DataBench training samples")
+    # 读取结构化输入：args.failures，保留原有样本身份字段。
     student = chapter4.id_index(read_jsonl(args.failures))
     teacher, tok = make_model(cfg), tokenizer(args.tokenizer)
 
+    # 逐题重放真实失败前缀并产生教师修订。
+    # 相关调用：digest、teacher.generate。
+    # 异常约束：Student failure cannot be replayed in the same visible state
     def repairs():
         for sample in _materialized(data, args.tables):
             pred = student.get(sample["id"])
@@ -191,10 +243,16 @@ def repair4(args):
             else:
                 continue
 
+            # RepairModel：重放学生失败前缀，再将同一可见状态交给教师继续生成。
             class RepairModel:
+                # 初始化 RepairModel 的依赖及持久状态；具体预算和身份字段见赋值。
                 def __init__(self):
                     self.prefix = iter(prefix)
 
+                # 先重放学生已见前缀，核对消息完全一致后才交给教师续写。
+                # 输入：messages（模型可见消息）。
+                # 相关调用：teacher.generate。
+                # 异常约束：Student failure cannot be replayed in the same visible state
                 def generate(self, messages):
                     prior = next(self.prefix, None)
                     if prior is None:
@@ -211,11 +269,16 @@ def repair4(args):
     save(f"{args.output}.meta.json", {**metadata(cfg), "failure_hash": digest(student)})
 
 
+# 限制来源为训练题，把可重放且答案匹配的教师轨迹编译为监督记录。
+# 输入：args（已解析的命令参数）。
+# 相关调用：read_jsonl、write_jsonl。
+# 异常约束：Record compilation requires DataBench training data
 def records4(args):
     data = read_jsonl(args.data)
     chapter4.id_index(data)
     if any(s["split"] != "train" or s["dataset"] != "databench" for s in data):
         raise ValueError("Record compilation requires DataBench training data")
+    # 读取结构化输入：args.traces，保留原有样本身份字段。
     traces = chapter4.id_index(read_jsonl(args.traces)) if args.traces else {}
     protocol = Protocol(args.group, args.ablation)
     if protocol.group == "L1":
@@ -225,6 +288,7 @@ def records4(args):
     tok = tokenizer(args.tokenizer)
     audit = []
 
+    # 逐题编译允许来源的监督记录，并同时积累排除原因。
     def records():
         for sample in _materialized(data, args.tables):
             key = sample["id"]
@@ -236,11 +300,17 @@ def records4(args):
                 audit.append({"id": key, "records": 0, "error": str(exc)})
 
     write_jsonl(args.output, records())
+    # 保存逐条结构化产物到 f'{args.output}.audit.jsonl'，供后续重放或审核读取。
     write_jsonl(f"{args.output}.audit.jsonl", audit)
 
 
+# 校验冻结规则、来源隔离和人工配对后，运行或读取预测并生成诊断。
+# 输入：args（已解析的命令参数）。
+# 相关调用：read_jsonl、write_jsonl、digest。
+# 异常约束：A diagnostic source overlaps an earlier split or the rule hash changed
 def diagnostics4(args):
     data = read_jsonl(args.data)
+    # 读取结构化输入：args.train，保留原有样本身份字段。
     train, dev = read_jsonl(args.train), read_jsonl(args.dev) if args.dev else []
     eligible = chapter4.validate_pair_sources(train, data, args.phase, dev)
     if args.phase == "test":
@@ -250,13 +320,14 @@ def diagnostics4(args):
         rules_hash = frozen["rules_hash"]
     else:
         rules_hash = digest(read_json(args.rules))
+    # 读取结构化输入：args.pairs，保留原有样本身份字段。
     pairs = read_jsonl(args.pairs)
     if not pairs or any(p["source_id"] not in eligible or p["rules_hash"] != rules_hash for p in pairs):
         raise ValueError("A diagnostic source overlaps an earlier split or the rule hash changed")
     if {p["kind"] for p in pairs} != {"view_swap", "hidden_answer", "scope_swap"}:
         raise ValueError("Include all three diagnostic controls")
-    earlier = {r["question"].strip().casefold() for r in [*train, *dev]}
-    if any(p[k]["question"].strip().casefold() in earlier for p in pairs for k in ("a", "b")):
+    earlier = {chapter4.normalized_question(r["question"]) for r in [*train, *dev]}
+    if any(chapter4.normalized_question(p[k]["question"]) in earlier for p in pairs for k in ("a", "b")):
         raise ValueError("A diagnostic variant repeats an earlier question")
     ids = [p[k]["id"] for p in pairs for k in ("a", "b")]
     if len(ids) != len(set(ids)):
@@ -264,6 +335,7 @@ def diagnostics4(args):
     cfg, protocol = _prediction4_config(args)
     model = make_model(cfg) if not args.predictions else None
     tok = tokenizer(args.tokenizer)
+    # 读取结构化输入：args.predictions，保留原有样本身份字段。
     previous = chapter4.id_index(read_jsonl(args.predictions)) if args.predictions else {}
     if args.predictions and (set(previous) != set(ids) or any(
             (p["group"], p["ablation"]) != (protocol.group, protocol.ablation) for p in previous.values())):
@@ -294,9 +366,14 @@ def diagnostics4(args):
             rows.append(chapter4.paired_diagnostic({source["id"]: source}, pair, result))
     save(args.output, {"phase": args.phase, "cohort_hash": digest(data), "rules_hash": rules_hash,
                        "groups": chapter4.diagnostic_summary(rows), "pairs": rows})
+    # 保存逐条结构化产物到 f'{args.output}.predictions.jsonl'，供后续重放或审核读取。
     write_jsonl(f"{args.output}.predictions.jsonl", predictions)
 
 
+# 核对同底座、种子、预算与测试来源，输出全量和长短表对照。
+# 输入：args（已解析的命令参数）。
+# 相关调用：read_jsonl、digest、Path(f'{args.output}.md').write_text。
+# 异常约束：Formal Chapter 4 comparisons require the official test manifest
 def main4(args):
     data = read_jsonl(args.data)
     if any(s["dataset"] != "databench" or s["split"] != "test" for s in data):
@@ -313,6 +390,7 @@ def main4(args):
             raise ValueError("Main results require local student predictions on the frozen test manifest")
         identities.add((config["model"], config.get("revision"), config.get("seed", 42), meta["tokenizer"],
                         meta["source_hash"], config["max_input_tokens"], config["max_new_tokens"]))
+        # 读取结构化输入：path，保留原有样本身份字段。
         groups[group] = read_jsonl(path)
     if len(identities) != 1:
         raise ValueError("Main groups must share base model, seed, tokenizer, code and budget")
@@ -330,10 +408,18 @@ def main4(args):
     Path(f"{args.output}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+# 解析双章实验子命令，并调用对应的采集、重放或报告流程。
+# 输入：argv（命令参数列表）。
+# 相关调用：read_jsonl。
+# 返回形式含：cmd。
 def main(argv=None):
+    # 定义本入口的参数解析器；位置参数、默认值和允许取值由相邻 add_argument 明确声明。
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
 
+    # 注册一个实验子命令及其位置参数，供统一解析入口使用。
+    # 输入：name；*positionals。
+    # 返回形式含：cmd。
     def command(name, *positionals):
         cmd = commands.add_parser(name)
         for item in positionals:
@@ -374,6 +460,7 @@ def main(argv=None):
     for i in range(5):
         cmd.add_argument(f"--L{i}", required=True)
     command("cost4", "data", "predictions", "output")
+    # 解析本次命令的实际参数，后续样本路径和实验开关均由此确定。
     args = parser.parse_args(argv)
     if args.command == "prepare4":
         prepare_databench(args)
@@ -389,6 +476,7 @@ def main(argv=None):
                                                 read_jsonl(args.reviews), group=args.group, budget=args.budget,
                                                 input_limit=args.input_limit))
     elif args.command == "partition3":
+        # 读取结构化输入：args.fixed，保留原有样本身份字段。
         save(args.output, chapter3.compare_partition_targets(read_jsonl(args.fixed), read_jsonl(args.constrained)))
     elif args.command == "predict4":
         predict4(args)

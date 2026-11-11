@@ -1,3 +1,5 @@
+# 脚本用途：构造合成改表反例，观察删除题意条件后的程序行为。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """A synthetic counterexample, never a benchmark or training augmentation."""
 import json
 from pathlib import Path
@@ -12,6 +14,7 @@ ops=[{'op':'sort','column':'c1','type':'number','descending':True},
 state=TableState.from_table(table)
 loose,proof=optimize_operations(state,ops)
 guarded,_=optimize_operations(state,ops,preserve_kinds=('filter','sort','select','group_aggregate'))
+# 在明确给出的表状态上重放操作链，核对执行结果和来源追踪。
 original_results={name:run_plan(state,chain)[0] for name,chain in [('full',ops),('search',loose),('guarded',guarded)]}
 modified_results={name:run_plan(TableState.from_table(changed),chain)[0] for name,chain in [('full',ops),('search',loose),('guarded',guarded)]}
 assert original_results['full'].signature()==original_results['search'].signature()

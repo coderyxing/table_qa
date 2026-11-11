@@ -1,3 +1,5 @@
+# 脚本用途：从绑定来源的开发结果生成独立统计图。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Standalone, source-bound development figures; no final thesis-test claim."""
 import argparse
 import json
@@ -6,8 +8,10 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
+# 定义本入口的参数解析器；位置参数、默认值和允许取值由相邻 add_argument 明确声明。
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('analysis');p.add_argument('mechanisms');p.add_argument('output')
+# 解析本次命令的实际参数，后续样本路径和实验开关均由此确定。
 args=p.parse_args()
 analysis=json.loads(Path(args.analysis).read_text(encoding='utf-8'))
 mechanisms=json.loads(Path(args.mechanisms).read_text(encoding='utf-8'))
@@ -19,6 +23,8 @@ root=Path(args.output);root.mkdir(parents=True,exist_ok=True)
 plt.rcParams.update({'font.family':'DejaVu Sans','font.size':10,'pdf.fonttype':42,'svg.fonttype':'none',
                      'axes.spines.top':False,'axes.spines.right':False,'axes.axisbelow':True})
 
+# 创建输出目录并保存当前阶段的结构化产物。
+# 输入：fig；name。
 def save(fig,name):
     for extension in ['png','pdf','svg']:
         fig.savefig(root/f'{name}.{extension}',dpi=300,bbox_inches='tight',facecolor='white')

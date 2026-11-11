@@ -1,3 +1,5 @@
+# 脚本用途：检查下载端点与服务器连接情况，输出经过限制的网络诊断。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Read-only network diagnostics; deliberately never prints proxy credentials."""
 import os
 import ssl

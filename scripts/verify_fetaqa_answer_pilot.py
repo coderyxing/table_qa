@@ -1,3 +1,5 @@
+# 脚本用途：重新加载已保存适配器，修正并审计答案监督的评价产物。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Correct and audit saved-adapter evaluation without repeating training.
 
 The initial launcher omitted the SD adapter argument. Preserve its files as
@@ -18,12 +20,25 @@ from tableqa.inference import predict
 from tableqa.reporting import freeform_metrics,compare_freeform
 
 
+# 读取指定结构化产物，交由当前阶段核验来源和配置。
+# 输入：path（输入或输出路径）。
+# 相关调用：Path(path).read_text。
 def load(path):return json.loads(Path(path).read_text(encoding='utf-8'))
+# 计算文件或产物内容摘要，供模型、输入和协议绑定。
+# 输入：path（输入或输出路径）。
+# 相关调用：hashlib.sha256(Path(path).read_bytes()).hexdigest。
 def sha(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+# 创建输出目录并保存当前阶段的结构化产物。
+# 输入：path（输入或输出路径）；value。
+# 相关调用：Path(path).write_text。
 def save(path,value):Path(path).write_text(json.dumps(value,ensure_ascii=False,indent=2),encoding='utf-8')
 
 
+# 解析当前脚本参数，按模块说明执行本次冻结阶段并保存产物。
+# 相关调用：read_jsonl、write_jsonl、(root / 'report.md').write_text、(root / 'COMPLETE').write_text。
+# 异常约束：Preserve existing verified evaluation
 def main():
+    # 定义本入口的参数解析器；位置参数、默认值和允许取值由相邻 add_argument 明确声明。
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('stage');args=p.parse_args();stage=Path(args.stage)
     root=stage/'verified-evaluation'
     if root.exists():raise ValueError('Preserve existing verified evaluation')
@@ -31,6 +46,7 @@ def main():
     original=stage/'results';protocol=load(original/'protocol.json');stats=load(original/'statistics.json')
     config=load(original/'training-config.json');adapter=original/'adapter'
     if load(adapter/'training_config.json')!=config:raise ValueError('Saved adapter training config mismatch')
+    # 读取结构化输入：original / 'records.jsonl'，保留原有样本身份字段。
     records=read_jsonl(original/'records.jsonl');samples=read_jsonl(original/'validation-samples.jsonl')
     if digest(records)!=protocol['records_sha256'] or digest(samples)!=protocol['validation_samples_sha256']:
         raise ValueError('Frozen records/validation changed')
@@ -44,6 +60,7 @@ def main():
         raise ValueError('Target token mismatch')
     inference=protocol['inference_model_config']
     if any(k in inference for k in ['adapter','cache']):raise ValueError('QD must be the unmodified uncached base')
+    # 读取结构化输入：original / 'QD-predictions.jsonl'，保留原有样本身份字段。
     qd=read_jsonl(original/'QD-predictions.jsonl')
     # Unlike training.py, the inference/reporting modules did not change.
     old_hashes={name:sha(stage/'code/tableqa'/name) for name in ['models.py','inference.py','reporting.py','core.py']}
@@ -56,7 +73,9 @@ def main():
            'adapter_sha256':adapter_sha,'actual_gradient_normalization':stats.get('gradient_normalization','legacy-unaveraged-microbatches'),
            'validation_samples_sha256':digest(samples),'inference_config':{**inference,'adapter':str(adapter.resolve())},
            'inference_module_hashes':old_hashes,'human_factual_consistency':None}
+    # 保存逐条结构化产物到 root / 'samples.jsonl'，供后续重放或审核读取。
     root.mkdir();save(root/'protocol.json',bound);save(root/'run.json',metadata(bound));write_jsonl(root/'samples.jsonl',samples)
+    # 按已读取配置构造生成后端，实际模型身份和预算由该配置登记。
     model=make_model(bound['inference_config'])
     if not getattr(model.model,'peft_config',None) or not model.model.active_adapters:
         raise ValueError('Saved adapter is not active in the actual model')
@@ -64,7 +83,9 @@ def main():
          'adapter_sha256':adapter_sha,'model_class':type(model.model).__name__})
     sd=[]
     for i,sample in enumerate(samples):
+        # 对当前样本运行完整推理入口，返回值包含答案、状态、错误和调用成本。
         row=predict(sample,model,settings('B0',max_repairs=0));row['metrics']['latency_comparable']=False
+        # 保存逐条结构化产物到 root / 'SD-predictions.jsonl'，供后续重放或审核读取。
         sd.append(row);write_jsonl(root/'SD-predictions.jsonl',sd)
         print('FETAQA_VERIFIED_SD',stage.name,i+1,len(samples),row['status'],flush=True)
     del model;gc.collect()

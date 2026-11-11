@@ -1,3 +1,5 @@
+# 脚本用途：按已登记元数据并行下载 HTTP 字节区间，校验分块后合并并核对完整哈希。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Verified HTTP range downloader for the existing ModelScope manifest.
 
 Requires the manifest from download_model.py. Never executes model repository code.
@@ -16,12 +18,18 @@ from urllib.parse import quote
 
 CHUNK=8*1024*1024
 
+# 分块读取文件求 SHA-256，避免一次把大权重文件载入内存。
+# 输入：path（输入或输出路径）。
+# 相关调用：h.hexdigest。
 def hash_file(path):
     h=hashlib.sha256()
     with path.open('rb') as f:
         for b in iter(lambda:f.read(CHUNK),b''): h.update(b)
     return h.hexdigest()
 
+# 按请求的 URL 或字节区间下载文件，交由后续大小与哈希检查验收。
+# 输入：url；start；end；size；target。
+# 相关调用：header.read_text。
 def fetch(url,start,end,size,target):
     header=target.with_suffix('.headers')
     if target.exists() and target.stat().st_size==end-start+1 and not header.exists(): return
@@ -37,7 +45,11 @@ def fetch(url,start,end,size,target):
         time.sleep(min(30,2**attempt))
     raise RuntimeError(f'Range failed or ignored: {start}-{end}; curl={result.returncode}')
 
+# 解析当前脚本参数，按模块说明执行本次冻结阶段并保存产物。
+# 相关调用：(root / 'DOWNLOAD_COMPLETE').write_text、(root / 'download-manifest.json').read_text。
+# 异常约束：Unsafe path
 def main():
+    # 定义本入口的参数解析器；位置参数、默认值和允许取值由相邻 add_argument 明确声明。
     p=argparse.ArgumentParser(); p.add_argument('model'); p.add_argument('directory'); p.add_argument('--workers',type=int,default=8); p.add_argument('--probe',action='store_true'); args=p.parse_args()
     root=Path(args.directory).resolve()
     records=json.loads((root/'download-manifest.json').read_text())
@@ -65,6 +77,8 @@ def main():
                     if end>=partial.stat().st_size: break
                     if not path.exists():
                         f.seek(start); path.write_bytes(f.read(end-start+1))
+        # 执行一个独立下载任务，供并行工作池调度。
+        # 输入：job。
         def work(job):
             start,end,path=job; fetch(url,start,end,size,path); return end-start+1
         begin=time.monotonic(); done=0

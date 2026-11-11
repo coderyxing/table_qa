@@ -1,3 +1,5 @@
+# 脚本用途：下载作者发布的 WTQ 训练题及对应原表，构建小批量开发输入。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Fetch 200 training examples + their tables from the author's WTQ repo.
 
 Pilot only: not a substitute for the final official train/dev/test protocol.
@@ -12,6 +14,11 @@ import subprocess
 
 root=Path('data/raw/wikitq'); root.mkdir(parents=True,exist_ok=True)
 base='https://raw.githubusercontent.com/ppasupat/WikiTableQuestions/master/'
+# 按请求的 URL 或字节区间下载文件，交由后续大小与哈希检查验收。
+# 输入：relative。
+# 相关调用：hashlib.sha256(path.read_bytes()).hexdigest。
+# 返回形式含：字段 path、sha256、source。
+# 异常约束：Unsafe table path
 def fetch(relative):
     path=(root/relative).resolve()
     if not path.is_relative_to(root.resolve()): raise ValueError('Unsafe table path')

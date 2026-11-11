@@ -1,3 +1,5 @@
+# 脚本用途：在相同来源和开发队列上训练评价 7B 容量对照。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """7B capacity control on the identical 149 sources and frozen tuning cohort."""
 import gc
 import json
@@ -21,16 +23,20 @@ model_path=Path('models/Qwen2.5-7B-Instruct').resolve()
 if not (model_path/'DOWNLOAD_COMPLETE').exists():raise ValueError('Verified weights required')
 if shutil.disk_usage('.').free<8*1024**3:raise ValueError('Keep at least 8 GiB free before training')
 cfg=json.loads((source/'B5/run.json').read_text())['config'];cfg={**cfg,'model':str(model_path)}
+# 读取结构化输入：'runs/medium-development/students/B5-records.jsonl'，保留原有样本身份字段。
 records=read_jsonl('runs/medium-development/students/B5-records.jsonl')
+# 读取结构化输入：'runs/accuracy-development-v1/samples.jsonl'，保留原有样本身份字段。
 samples=read_jsonl('runs/accuracy-development-v1/samples.jsonl')
 if any(s['split']!='validation' for s in samples):raise ValueError('Only frozen validation tuning samples allowed')
 context_limit=json.loads((model_path/'config.json').read_text())['max_position_embeddings']
 if context_limit<8192+512:raise ValueError('Actual 7B context configuration is too small')
+# 使用本阶段指定的 tokenizer；预算、提示模板与监督掩码应沿用同一版本。
 tokenizer=AutoTokenizer.from_pretrained(model_path,local_files_only=True)
 _,preflight=prepare_training_data(cfg,records,tokenizer)
 old=json.loads((source/'report.json').read_text())['models']['B5']['training']
 if preflight['retained_source_ids_sha256']!=old['retained_source_ids_sha256']:
     raise ValueError('7B actual source coverage differs from 3B control')
+# 保存逐条结构化产物到 root / 'samples.jsonl'，供后续重放或审核读取。
 root.mkdir(parents=True);write_jsonl(root/'samples.jsonl',samples)
 (root/'preflight.json').write_text(json.dumps(preflight,indent=2))
 (root/'run.json').write_text(json.dumps(metadata(cfg),indent=2))
@@ -40,6 +46,7 @@ root.mkdir(parents=True);write_jsonl(root/'samples.jsonl',samples)
     'G':'F plus same 3B B0 fallback as 3B D','native_tokenizer_audited':True,
     'not_equal_parameter_or_compute_budget':True,'confirmation_not_evaluated':True,
     'timing':'Accuracy control only; no matched latency benchmark or algorithm-only attribution'},indent=2))
+# 执行当前配置的训练阶段，输出检查点与实际训练记录统计。
 torch.cuda.reset_peak_memory_stats();statistics=train(cfg,records,root/'adapter')
 if statistics['retained_source_ids_sha256']!=old['retained_source_ids_sha256']:raise ValueError('Actual training coverage changed')
 (root/'training-statistics.json').write_text(json.dumps(statistics,indent=2))
@@ -47,16 +54,20 @@ gc.collect();torch.cuda.empty_cache()
 primary=LocalModel(str(model_path),adapter=str(root/'adapter'),max_new_tokens=512,max_input_tokens=4096,seed=42)
 outputs={'E':[],'F':[],'G':[]}
 for sample in samples:
+    # 对当前样本运行完整推理入口，返回值包含答案、状态、错误和调用成本。
     pred=predict(sample,primary,settings('B5',max_repairs=1));pred['metrics']['latency_comparable']=False
+    # 保存逐条结构化产物到 root / 'E-predictions.jsonl'，供后续重放或审核读取。
     outputs['E'].append(pred);write_jsonl(root/'E-predictions.jsonl',outputs['E'])
     (root/'progress.json').write_text(json.dumps({'condition':'E','completed':len(outputs['E']),'expected':len(samples)}))
 primary.max_input_tokens=8192
 fallback_config=json.loads(Path('runs/accuracy-development-v1/C.json').read_text())['fallback_model_config']
+# 按已读取配置构造生成后端，实际模型身份和预算由该配置登记。
 backup=make_model(fallback_config)
 for sample in samples:
     pred,routed=predict_with_recovery(sample,primary,backup,settings('B5',max_repairs=2))
     pred['metrics']['latency_comparable']=False
     outputs['F'].append(pred);outputs['G'].append(routed)
+    # 保存逐条结构化产物到 root / 'F-predictions.jsonl'，供后续重放或审核读取。
     write_jsonl(root/'F-predictions.jsonl',outputs['F']);write_jsonl(root/'G-predictions.jsonl',outputs['G'])
     (root/'progress.json').write_text(json.dumps({'condition':'F/G','completed':len(outputs['F']),'expected':len(samples)}))
 del primary,backup;gc.collect();torch.cuda.empty_cache()

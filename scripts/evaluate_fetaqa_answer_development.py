@@ -1,3 +1,5 @@
+# 脚本用途：在额外冻结的 FeTaQA 开发集上比较固定权重的自动指标。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Additional fixed-weight 100-example FeTaQA development comparison.
 
 Independent of the 12-example cohort only in exact table/question membership;
@@ -18,19 +20,34 @@ from tableqa.models import make_model
 from tableqa.reporting import freeform_metrics,compare_freeform
 
 
+# 读取指定结构化产物，交由当前阶段核验来源和配置。
+# 输入：path（输入或输出路径）。
+# 相关调用：Path(path).read_text。
 def load(path):return json.loads(Path(path).read_text(encoding='utf-8'))
+# 创建输出目录并保存当前阶段的结构化产物。
+# 输入：path（输入或输出路径）；value。
+# 相关调用：Path(path).write_text。
 def save(path,value):Path(path).write_text(json.dumps(value,ensure_ascii=False,indent=2),encoding='utf-8')
+# 计算文件或产物内容摘要，供模型、输入和协议绑定。
+# 输入：path（输入或输出路径）。
+# 相关调用：hashlib.sha256(Path(path).read_bytes()).hexdigest。
 def sha(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+# 解析当前脚本参数，按模块说明执行本次冻结阶段并保存产物。
+# 相关调用：read_jsonl、(root / 'report.md').write_text、(root / 'COMPLETE').write_text、write_jsonl。
+# 异常约束：Frozen samples changed
 def main():
+    # 定义本入口的参数解析器；位置参数、默认值和允许取值由相邻 add_argument 明确声明。
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('action',choices=['prepare','QD','SD','report']);p.add_argument('output');args=p.parse_args();root=Path(args.output)
     stage=Path('runs/fetaqa-answer-supervision-v2');verified=stage/'verified-evaluation'
     if args.action=='prepare':
         if root.exists():raise ValueError('Preserve existing frozen development cohort')
         if not load(verified/'completion-audit.json')['actual_adapter_loaded']:raise ValueError('Verified model loading required')
+        # 读取结构化输入：verified / 'samples.jsonl'，保留原有样本身份字段。
         original=load(stage/'results/protocol.json');samples12=read_jsonl(verified/'samples.jsonl')
         excluded={table_fingerprint(s['table']) for s in samples12}
+        # 读取结构化输入：'data/normalized/joint_validation_clean.jsonl'，保留原有样本身份字段。
         candidates=sorted([s for s in read_jsonl('data/normalized/joint_validation_clean.jsonl') if s['dataset']=='fetaqa'],key=lambda s:s['id'])
         random.Random(2038).shuffle(candidates);samples=[];seen=set(excluded)
         for s in candidates:
@@ -40,6 +57,7 @@ def main():
             seen.add(fp);samples.append(s)
             if len(samples)==100:break
         if len(samples)!=100:raise ValueError('Insufficient distinct validation tables')
+        # 读取结构化输入：stage / 'results/train-samples.jsonl'，保留原有样本身份字段。
         training=read_jsonl(stage/'results/train-samples.jsonl');train_fps={table_fingerprint(s['table']) for s in training}
         if any(table_fingerprint(s['table']) in train_fps for s in samples):raise ValueError('Training table overlap')
         adapter=stage/'results/adapter';config=original['inference_model_config']
@@ -53,8 +71,10 @@ def main():
             'inference_settings':{'mode':'B0','max_repairs':0},'same_model_prompt_call_budget':True,
             'different_physical_A40s_allowed':True,'latency_comparable':False,
             'human_factual_consistency':None,'automatic_adoption':False,'bootstrap_repeats':500}
+        # 保存逐条结构化产物到 root / 'samples.jsonl'，供后续重放或审核读取。
         root.mkdir(parents=True);save(root/'protocol.json',protocol);save(root/'run.json',metadata(protocol));write_jsonl(root/'samples.jsonl',samples)
         print('FETAQA_100_FROZEN',digest(samples),flush=True);return
+    # 读取结构化输入：root / 'samples.jsonl'，保留原有样本身份字段。
     protocol=load(root/'protocol.json');samples=read_jsonl(root/'samples.jsonl')
     if len(samples)!=100 or digest(samples)!=protocol['samples_sha256']:raise ValueError('Frozen samples changed')
     if metadata({})['source_hash']!=load(root/'run.json')['source_hash']:raise ValueError('Execution modules changed')
@@ -63,6 +83,7 @@ def main():
         name=args.action;path=root/f'{name}-predictions.jsonl'
         if path.exists():raise ValueError('Preserve existing predictions; no silent reruns')
         config={**protocol['model_config'],**({'adapter':protocol['adapter']} if name=='SD' else {})}
+        # 按已读取配置构造生成后端，实际模型身份和预算由该配置登记。
         model=make_model(config)
         active=getattr(model.model,'peft_config',None)
         if bool(active)!=(name=='SD'):raise ValueError('Actual model adapter does not match condition')
@@ -70,12 +91,15 @@ def main():
              'adapter_sha256':protocol['adapter_sha256'] if active else None})
         rows=[]
         for i,sample in enumerate(samples):
+            # 对当前样本运行完整推理入口，返回值包含答案、状态、错误和调用成本。
             row=predict(sample,model,settings('B0',max_repairs=0));row['metrics']['latency_comparable']=False
+            # 保存逐条结构化产物到 path，供后续重放或审核读取。
             rows.append(row);write_jsonl(path,rows);save(root/f'{name}-progress.json',{'completed':i+1,'expected':100})
             print('FETAQA_100',name,i+1,100,row['status'],flush=True)
         (root/f'{name}-COMPLETE').write_text('fixed condition complete\n');return
     if not all((root/f'{n}-COMPLETE').exists() for n in ['QD','SD']):raise ValueError('Wait for both conditions')
     if (root/'report.json').exists():raise ValueError('Preserve existing final report')
+    # 读取结构化输入：root / f'{n}-predictions.jsonl'，保留原有样本身份字段。
     outputs={n:read_jsonl(root/f'{n}-predictions.jsonl') for n in ['QD','SD']}
     report={'development_only':True,'automatic_adoption':False,'human_factual_consistency':None,
         'conditions':{n:freeform_metrics(rows,samples) for n,rows in outputs.items()},

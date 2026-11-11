@@ -1,3 +1,5 @@
+# 脚本用途：转换并运行 WikiTQ v1.0.2 官方指称算法，绑定样本、预测和规范答案的哈希。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Run WTQ v1.0.2's official denotation functions via a recorded Python3 port.
 
 Supply the evaluator and CoreNLP tagged files from the official archive.
@@ -12,9 +14,11 @@ from pathlib import Path
 import warnings
 from tableqa.data import read_jsonl,digest
 
+# 定义本入口的参数解析器；位置参数、默认值和允许取值由相邻 add_argument 明确声明。
 parser=argparse.ArgumentParser()
 parser.add_argument('samples'); parser.add_argument('predictions'); parser.add_argument('output')
 parser.add_argument('--evaluator',required=True); parser.add_argument('--tagged',required=True)
+# 解析本次命令的实际参数，后续样本路径和实验开关均由此确定。
 args=parser.parse_args()
 source=Path(args.evaluator).read_text(encoding='utf-8')
 with warnings.catch_warnings():
@@ -26,6 +30,8 @@ module_path=out/'official_evaluator_py3.py'; module_path.write_text(converted,en
 spec=importlib.util.spec_from_file_location('_official_wtq',module_path)
 official=importlib.util.module_from_spec(spec); spec.loader.exec_module(official)
 if official.__version__!='1.0.2': raise ValueError('Unexpected official evaluator version')
+# 按当前函数约定计算匹配或筛选判定，供上层执行或官方判分复用。
+# 输入：target；prediction（单条预测或教师轨迹）；canonical。
 def match(target,prediction,canonical=None):
     return official.check_denotation(official.to_value_list(target,canonical),official.to_value_list(prediction))
 assert match(['Café'],['cafe'])
@@ -37,7 +43,9 @@ for path in sorted(Path(args.tagged).glob('*.tagged')):
     with path.open(encoding='utf-8') as f:
         for row in csv.DictReader(f,delimiter='\t',quoting=csv.QUOTE_NONE):
             targets[row['id']]=(official.tsv_unescape_list(row['targetValue']),official.tsv_unescape_list(row['targetCanon']))
+# 读取结构化输入：args.samples，保留原有样本身份字段。
 samples=[r for r in read_jsonl(args.samples) if r['dataset']=='wikitq']
+# 读取结构化输入：args.predictions，保留原有样本身份字段。
 predictions=[r for r in read_jsonl(args.predictions) if r['dataset']=='wikitq']
 lookup={r['id']:r for r in predictions}
 if len(lookup)!=len(predictions) or {r['id'] for r in samples}!=set(lookup):

@@ -1,3 +1,5 @@
+# 脚本用途：核对已完成联合对照的产物并输出结果摘要。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Audit and format completed joint controls; no training or model calls."""
 import argparse
 import hashlib
@@ -5,16 +7,27 @@ import json
 from pathlib import Path
 
 
+# 读取指定结构化产物，交由当前阶段核验来源和配置。
+# 输入：p。
+# 相关调用：Path(p).read_text。
 def load(p):return json.loads(Path(p).read_text(encoding='utf-8'))
+# 计算文件或产物内容摘要，供模型、输入和协议绑定。
+# 输入：p。
+# 相关调用：hashlib.sha256(Path(p).read_bytes()).hexdigest。
 def sha(p):return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 
 
+# 解析当前脚本参数，按模块说明执行本次冻结阶段并保存产物。
+# 相关调用：read_jsonl、(root / 'report.md').write_text、(root / 'completion-audit.json').write_text、digest。
+# 异常约束：Wait for all conditions
 def main():
+    # 定义本入口的参数解析器；位置参数、默认值和允许取值由相邻 add_argument 明确声明。
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('stage');args=parser.parse_args();root=Path(args.stage)
     if not (root/'COMPLETE').exists():raise ValueError('Wait for all conditions')
     if (root/'completion-audit.json').exists():raise ValueError('Preserve completed audit')
     protocol=load(root/'protocol.json');report=load(root/'report.json');preflight=load(root/'preflight.json')
     from tableqa.data import read_jsonl,digest
+    # 读取结构化输入：root / 'sources.jsonl'，保留原有样本身份字段。
     sources=read_jsonl(root/'sources.jsonl');samples=read_jsonl(root/'samples.jsonl')
     if digest(sources)!=protocol['sources_sha256'] or digest(samples)!=protocol['validation_sha256']:raise ValueError('Frozen sources/evaluation changed')
     expected_ids={(s['dataset'],s['id']) for s in sources};sample_ids={(s['dataset'],s['id']) for s in samples}
@@ -26,6 +39,7 @@ def main():
         '|---|---:|---:|---:|---:|---:|---:|---:|---:|']
     for mode in ['B0','B2','B5']:
         out=root/mode;statistics=load(out/'statistics.json');exposure=load(out/'adapter/training_exposure.json')['per_source']
+        # 读取结构化输入：out / 'predictions.jsonl'，保留原有样本身份字段。
         history=load(out/'adapter/training_history.json');predictions=read_jsonl(out/'predictions.jsonl');loaded=load(out/'loaded-model.json')
         if {(r['dataset'],r['id']) for r in exposure}!=expected_ids:raise ValueError('Actual source exposure mismatch')
         if len(predictions)!=len(samples) or {(r['dataset'],r['id']) for r in predictions}!=sample_ids:raise ValueError('Prediction coverage mismatch')

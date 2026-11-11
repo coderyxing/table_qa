@@ -1,3 +1,5 @@
+# 模块职责：用精确字符跨度提取派生列，保留当前单元格与原表来源之间的审核关系。
+# 接口约定：样本、操作和结果采用本项目的结构化字典；细节见各入口及字段检查。
 """Bounded substring extraction with auditable character spans, no generated code.
 
 Copied text has a mechanical source check. Selecting the right field or meaning
@@ -6,10 +8,15 @@ is still a model decision and is NOT certified by substring membership.
 import re
 
 
+# ExtractionError：字符抽取参数或源文本结构不满足规则时抛出的错误。
 class ExtractionError(ValueError):
     pass
 
 
+# 调整提取片段两端空白，同时维护原字符串上的字符位置。
+# 输入：text（待解析文本）；start；end。
+# 返回形式含：2 项组成的结果。
+# 异常约束：Extraction produced an empty field
 def _trim_span(text, start, end):
     while start < end and text[start].isspace():
         start += 1
@@ -20,6 +27,10 @@ def _trim_span(text, start, end):
     return start, end
 
 
+# 按白名单规则定位完整字符片段，拒绝不支持或含糊结构。
+# 输入：value；rule；index；delimiter。
+# 返回形式含：字段 start、end、value、coordinate_system、copy_verified、semantic_correctness。
+# 异常约束：Extraction requires a bounded string cell
 def extract_span(value, rule, index=0, delimiter=None):
     """Return an exact Python-codepoint slice of the current source cell.
 
@@ -78,6 +89,8 @@ def extract_span(value, rule, index=0, delimiter=None):
             'copy_verified': True, 'semantic_correctness': 'not_proven'}
 
 
+# 遍历表达式中的抽取节点，供能力开关和证据审核。
+# 输入：value。
 def extraction_nodes(value):
     if not isinstance(value, dict):
         return
@@ -87,6 +100,9 @@ def extraction_nodes(value):
         yield from extraction_nodes(arg)
 
 
+# 校验抽取表达式需要的参数与源列引用。
+# 输入：expr。
+# 异常约束：extract requires exactly one direct source-column argument
 def extraction_argument(expr):
     args = expr.get('args', [])
     if not isinstance(args, list) or len(args) != 1 or not isinstance(args[0], dict) or set(args[0]) != {'col'}:
@@ -94,17 +110,24 @@ def extraction_argument(expr):
     return args[0]['col']
 
 
+# 对当前行的源单元格执行抽取，并返回可追溯结果。
+# 输入：expr；row（当前行记录）。
 def extract_from_row(expr, row):
     column = extraction_argument(expr)
     return extract_span(row[column], expr.get('rule'), expr.get('index', 0), expr.get('delimiter'))
 
 
+# 为派生抽取保存当前单元格跨度与根单元格来源。
+# 输入：state（当前执行状态）；op。
+# 返回形式含：records。
 def extraction_audit(state, op):
     """Character positions refer to the current cell, with root cell lineage.
 
     A source may itself be derived. Root lineage alone does not imply that these
     offsets apply directly to every original cell; the scope is recorded below.
     """
+    # 遍历实际被选择的条件分支，收集本次执行发生的抽取节点。
+    # 输入：expr；row（当前行记录）。
     def active_nodes(expr, row):
         if not isinstance(expr, dict):
             return
@@ -129,6 +152,8 @@ def extraction_audit(state, op):
     return records
 
 
+# 判断操作链是否依赖抽取工具，以确保提示和执行配置一致。
+# 输入：operations（白名单操作序列）。
 def uses_extraction(operations):
     if isinstance(operations, dict):
         return operations.get('op') == 'extract' or any(uses_extraction(v) for v in operations.values())

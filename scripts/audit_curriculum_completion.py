@@ -1,3 +1,5 @@
+# 脚本用途：检查课程训练的实际日程、优化步数、记录身份和来源覆盖是否符合冻结协议。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Post-run audit of actual schedules, optimizer steps, identities and coverage."""
 import argparse
 from collections import defaultdict
@@ -8,7 +10,11 @@ from pathlib import Path
 from tableqa.data import read_jsonl, digest
 
 
+# 解析当前脚本参数，按模块说明执行本次冻结阶段并保存产物。
+# 相关调用：out.write_text、(stage / 'protocol.json').read_text、read_jsonl、(stage / f'{name}-config.json').read_text。
+# 异常约束：Completion audit already exists
 def main():
+    # 定义本入口的参数解析器；位置参数、默认值和允许取值由相邻 add_argument 明确声明。
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('root');args=p.parse_args()
     root=Path(args.root);stage=root/'prepared';out=root/'completion-audit.json'
     if out.exists():raise ValueError('Completion audit already exists')
@@ -17,6 +23,7 @@ def main():
     schedules={}
     for name in ['R','M']:
         training=root/f'training-{name}';config=json.loads((stage/f'{name}-config.json').read_text())
+        # 读取结构化输入：stage / f'{name}-records.jsonl'，保留原有样本身份字段。
         records=read_jsonl(stage/f'{name}-records.jsonl')
         schedules[name]=records
         if digest(records)!=config['frozen_records_sha256']:raise ValueError('Frozen records changed')
@@ -75,6 +82,7 @@ def main():
     audit['prediction_files']={}
     for name in ['P','R','M']:
         for cohort,filename in [('development','development-samples.jsonl'),('synthetic','synthetic-probe.jsonl')]:
+            # 读取结构化输入：stage / filename，保留原有样本身份字段。
             samples=read_jsonl(stage/filename);predictions=read_jsonl(root/'evaluation'/name/f'{cohort}-predictions.jsonl')
             key=lambda r:(r['dataset'],r['id'])
             if len(predictions)!=len(samples) or {key(p) for p in predictions}!={key(s) for s in samples}:

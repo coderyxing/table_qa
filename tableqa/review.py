@@ -1,3 +1,5 @@
+# 模块职责：生成独立人工审核材料，以样本和轨迹哈希绑定双人裁决，汇总一致审核结果。
+# 接口约定：样本、操作和结果采用本项目的结构化字典；细节见各入口及字段检查。
 """Human review packets and hash-bound training approvals. No automatic reviewer."""
 from collections import Counter
 from copy import deepcopy
@@ -13,10 +15,17 @@ REVIEW_FIELDS = {'trajectory_review_approved', 'trajectory_review_approval'}
 FILTER_SPLITS = {'train_filter': 'train', 'validation_filter': 'validation'}
 
 
+# 建立待人工复核的记录状态，保留缺失裁决的含义。
+# 输入：sample（规范样本记录）。
 def unreviewed(sample):
     return {k: v for k, v in sample.items() if k not in REVIEW_FIELDS}
 
 
+# 封装完整原表、题面和候选轨迹，并绑定审核对象哈希。
+# 输入：samples（固定样本集合）；predictions（完整预测集合）；purpose。
+# 相关调用：digest。
+# 返回形式含：字段 schema、purpose、items、packet_sha256。
+# 异常约束：Explicit train_filter, validation_filter or evaluation purpose required
 def make_packet(samples, predictions, purpose='train_filter'):
     if purpose not in {*FILTER_SPLITS, 'evaluation'}:
         raise ValueError('Explicit train_filter, validation_filter or evaluation purpose required')
@@ -35,6 +44,10 @@ def make_packet(samples, predictions, purpose='train_filter'):
             'packet_sha256': digest({'purpose': purpose, 'items': items})}
 
 
+# 复核审核材料中的身份和内容摘要，拒绝漂移的候选。
+# 输入：packet。
+# 相关调用：digest。
+# 异常约束：Unknown review packet schema/purpose
 def validate_packet(packet):
     if packet.get('schema') != SCHEMA or packet.get('purpose') not in {*FILTER_SPLITS, 'evaluation'}:
         raise ValueError('Unknown review packet schema/purpose')
@@ -54,6 +67,9 @@ def validate_packet(packet):
     if not keys: raise ValueError('Empty review packet')
 
 
+# 为同一审核对象生成独立的空白人工裁决字段。
+# 输入：packet。
+# 返回形式含：列表记录。
 def review_template(packet):
     validate_packet(packet)
     return [{'dataset': item['sample']['dataset'], 'id': item['sample']['id'],
@@ -62,6 +78,10 @@ def review_template(packet):
             for item in packet['items']]
 
 
+# 验证审核表的结构、覆盖及与原材料的哈希关系。
+# 输入：packet；rows。
+# 返回形式含：2 项组成的结果。
+# 异常约束：Review coverage must match the complete packet
 def _validated_reviews(packet, rows):
     expected = index_records(review_template(packet), 'template')
     actual = index_records(rows, 'review')
@@ -88,6 +108,9 @@ def _validated_reviews(packet, rows):
     return actual, next(iter(names))
 
 
+# 检查双人一致批准及内容绑定，供监督入池调用。
+# 输入：sample（规范样本记录）；prediction（单条预测或教师轨迹）；operations（白名单操作序列）。
+# 相关调用：digest。
 def review_approved(sample, prediction=None, operations=None):
     """Audit binding, not proof of reviewer identity or semantic truth."""
     approval = sample.get('trajectory_review_approval') or {}
@@ -103,6 +126,11 @@ def review_approved(sample, prediction=None, operations=None):
     return bool(approval.get('packet_sha256') and approval.get('item_sha256'))
 
 
+# 汇合两份独立裁决，保留分歧和不确定条目。
+# 输入：packet；reviewer1；reviewer2。
+# 相关调用：digest。
+# 返回形式含：2 项组成的结果。
+# 异常约束：Two distinct reviewer identities required
 def merge_reviews(packet, reviewer1, reviewer2):
     validate_packet(packet)
     a, name1 = _validated_reviews(packet, reviewer1); b, name2 = _validated_reviews(packet, reviewer2)
@@ -135,6 +163,8 @@ def merge_reviews(packet, reviewer1, reviewer2):
             'semantic_correctness_proven': False, 'decisions': decisions}, approved
 
 
+# 把审核对象转义后写为无需网络资源的静态 HTML。
+# 输入：packet。
 def render_packet(packet):
     """Static offline HTML. Annotate separate JSONL templates; no external assets."""
     validate_packet(packet)

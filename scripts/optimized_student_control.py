@@ -1,3 +1,5 @@
+# 脚本用途：在固定分块 B5 中只改变压缩策略，比较搜索与历史规则。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """One-factor compression control: search vs legacy, both fixed-block B5."""
 import gc
 import json
@@ -18,18 +20,22 @@ root=Path('runs/optimized-student-control/results')
 if root.exists():raise ValueError('Output exists; preserve it before rerunning')
 audit=Path('runs/optimization-audit');control=Path('runs/coverage-student-control/results')
 summary=json.loads((audit/'report.json').read_text())
+# 读取结构化输入：audit / 'search_fixed-records.jsonl'，保留原有样本身份字段。
 records=read_jsonl(audit/'search_fixed-records.jsonl')
 if digest(records)!=summary['variants']['search_fixed']['record_sha256']:raise ValueError('Audited records changed')
 if summary['variants']['search_fixed']['record_sha256']==summary['variants']['legacy_fixed']['record_sha256']:
     raise ValueError('Candidate is identical; reuse the existing control rather than retraining')
 cfg=json.loads((control/'B5/run.json').read_text())['config']
+# 读取结构化输入：control / 'validation-samples.jsonl'，保留原有样本身份字段。
 validation=read_jsonl(control/'validation-samples.jsonl')
 if any(r['split']!='validation' for r in validation):raise ValueError('Source validation only')
+# 使用本阶段指定的 tokenizer；预算、提示模板与监督掩码应沿用同一版本。
 tokenizer=AutoTokenizer.from_pretrained(cfg['model'],local_files_only=True)
 _,prepared=prepare_training_data(cfg,records,tokenizer)
 previous=json.loads((control/'report.json').read_text())['models']['B5']['training']
 if prepared['retained_source_ids_sha256']!=previous['retained_source_ids_sha256']:
     raise ValueError('Actual training source IDs differ from the corrected control')
+# 保存逐条结构化产物到 root / 'records.jsonl'，供后续重放或审核读取。
 root.mkdir(parents=True);write_jsonl(root/'records.jsonl',records);write_jsonl(root/'validation-samples.jsonl',validation)
 (root/'preflight.json').write_text(json.dumps(prepared,indent=2))
 (root/'run.json').write_text(json.dumps(metadata(cfg),indent=2))
@@ -40,6 +46,7 @@ root.mkdir(parents=True);write_jsonl(root/'records.jsonl',records);write_jsonl(r
     'candidate_records_sha256':digest(records),'n_original_samples':prepared['source_samples_after_alignment'],
     'state_dp_not_tested_by_this_training':True,
     'timing':'Separate runs, no matched warm-up; observed ratios are not formal acceleration results'},indent=2))
+# 执行当前配置的训练阶段，输出检查点与实际训练记录统计。
 torch.cuda.reset_peak_memory_stats();statistics=train(cfg,records,root/'adapter')
 if statistics['retained_source_ids_sha256']!=previous['retained_source_ids_sha256']:raise ValueError('Training lost source coverage')
 (root/'training-statistics.json').write_text(json.dumps(statistics,indent=2))
@@ -47,7 +54,9 @@ gc.collect();torch.cuda.empty_cache()
 model=LocalModel(cfg['model'],adapter=str(root/'adapter'),max_new_tokens=512,max_input_tokens=4096,seed=42)
 predictions=[]
 for sample in validation:
+    # 对当前样本运行完整推理入口，返回值包含答案、状态、错误和调用成本。
     predictions.append(predict(sample,model,settings('B5')))
+    # 保存逐条结构化产物到 root / 'predictions.jsonl'，供后续重放或审核读取。
     write_jsonl(root/'predictions.jsonl',predictions)
 del model;gc.collect();torch.cuda.empty_cache()
 scripts=Path(__file__).resolve().parent

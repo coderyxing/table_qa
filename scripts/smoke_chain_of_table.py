@@ -1,3 +1,5 @@
+# 脚本用途：用合成文本回放验证上游规划和操作入口是否可执行。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Run a synthetic text replay through the verified official planning/operators."""
 import argparse
 import json
@@ -5,15 +7,27 @@ from tableqa.chain_of_table import load_upstream, predict_tabfact
 from tableqa.data import example
 
 
+# 解析当前脚本参数，按模块说明执行本次冻结阶段并保存产物。
+# 返回形式含：字段 text、input_tokens、output_tokens、model_seconds、cache_hit。
+# 异常约束：Original eight-candidate selection was not preserved
 def main():
+    # 定义本入口的参数解析器；位置参数、默认值和允许取值由相邻 add_argument 明确声明。
     parser = argparse.ArgumentParser(description=__doc__)
+    # 解析本次命令的实际参数，后续样本路径和实验开关均由此确定。
     parser.add_argument('source_audit'); args = parser.parse_args()
     chain, _ = load_upstream(args.source_audit)
     responses = ['f_select_column(name, score)'] + ["f_col(['name', 'score'])"] * 8 + ['<END>', 'YES']
+    # Backend：为上游接口提供固定合成响应，验证其文本规划流程。
     class Backend:
+        # 初始化 Backend 的依赖及持久状态；具体预算和身份字段见赋值。
+        # 输入：outputs。
         def __init__(self, outputs):
             self.outputs = iter(outputs)
             self.prompts = []
+        # 使用上游文本生成协议返回候选文本和生成使用量。
+        # 输入：messages（模型可见消息）；**kwargs。
+        # 返回形式含：字段 text、input_tokens、output_tokens、model_seconds、cache_hit。
+        # 异常约束：Reference leaked into an upstream prompt
         def generate_text(self, messages, **kwargs):
             if 'PRIVATE_GOLD_SENTINEL' in str(messages):
                 raise ValueError('Reference leaked into an upstream prompt')

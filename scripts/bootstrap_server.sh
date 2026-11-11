@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
+# 脚本用途：检查服务器并创建项目虚拟环境，支持仅检查模式。
+# 执行环境：Bash；先核对正文中的项目路径、虚拟环境、GPU 编号和阶段依赖。
+# 阅读提示：文件中的锁、进度及完成标记用于协调阶段；保留日志便于复核失败位置。
 # Run in the uploaded repository: bash scripts/bootstrap_server.sh [--check-only]
 # Creates a project venv only. Does not change drivers or install OS packages.
+# 启用脚本列出的严格模式；未处理的命令失败由阶段错误处理接管。
 set -euo pipefail
+# 进入协议指定的工作目录，后续相对路径均以这里为基准。
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 project_dir="$(pwd -P)"
+# 准备当前阶段使用的目录，已存在的目录按命令参数处理。
 mkdir -p runs/setup models data/raw data/normalized
 date -u '+%Y-%m-%dT%H:%M:%SZ' > runs/setup/started-utc.txt
 uname -a > runs/setup/system.txt
@@ -24,14 +30,17 @@ fi
 if [[ ! -f .venv/pyvenv.cfg ]]; then
   "$python_bin" -m venv .venv
 fi
+# 加载项目虚拟环境或阶段配置，使后续命令使用预期依赖。
 source .venv/bin/activate
 # Keep the bundled pip; upgrading it first can stall on an unreachable CDN.
 # cu121 wheel installation follows the official PyTorch previous-versions page.
+# 调用当前阶段的 Python 入口，参数中的文件明确给出本次输入与输出。
 python -m pip install 'torch==2.5.1' --index-url "${TABLEQA_TORCH_INDEX:-https://download.pytorch.org/whl/cu121}"
 python -m pip install -r requirements-server.txt
 python -m pip install --no-deps -e .
 python -m pip check
 python -m pip freeze > runs/setup/environment.lock.txt
+# 显式设置本阶段的环境变量，固定代码路径、缓存或设备可见性。
 export HF_HOME="$project_dir/models/huggingface"
 printf 'export HF_HOME=%q\n' "$HF_HOME" > runs/setup/env.sh
 python -c 'import torch; print("torch",torch.__version__,"runtime",torch.version.cuda); assert torch.cuda.is_available(); print("GPUs",torch.cuda.device_count()); assert torch.cuda.device_count() >= 2; print("BF16",torch.cuda.is_bf16_supported()); assert torch.cuda.is_bf16_supported()'

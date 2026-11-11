@@ -1,3 +1,5 @@
+# 脚本用途：固定抽取 FeTaQA 迁移诊断样本，比较既有模型的自动指标。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """No-human-review FeTaQA diagnostic: automatic metrics, no new training.
 
 Compares fixed P/R/M checkpoints on zero target-task training transfer. No
@@ -19,6 +21,10 @@ from tableqa.models import make_model
 from tableqa.reporting import freeform_metrics,compare_freeform
 
 
+# 按预先声明的来源和表格规则选题，保持开发队列可追溯。
+# 输入：rows；n；seed（随机种子）。
+# 返回形式含：result。
+# 异常约束：Insufficient distinct validation tables
 def select_samples(rows,n=12,seed=2036):
     if type(n) is not int or n<1:raise ValueError('Positive pilot size required')
     if any(r['split']!='validation' for r in rows):raise ValueError('Validation-only development pilot')
@@ -32,7 +38,11 @@ def select_samples(rows,n=12,seed=2036):
     raise ValueError('Insufficient distinct validation tables')
 
 
+# 解析当前脚本参数，按模块说明执行本次冻结阶段并保存产物。
+# 相关调用：write_jsonl、(root / 'protocol.json').write_text、(root / 'run.json').write_text、(root / 'report.json').write_text。
+# 异常约束：Output exists; preserve the frozen diagnostic
 def main():
+    # 定义本入口的参数解析器；位置参数、默认值和允许取值由相邻 add_argument 明确声明。
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('output');args=p.parse_args();root=Path(args.output)
     if root.exists():raise ValueError('Output exists; preserve the frozen diagnostic')
     previous=Path('runs/curriculum-student-v1')
@@ -53,7 +63,9 @@ def main():
         raise ValueError('Original adapter changed')
     for name in ['R','M']:
         if hashes[name]!=audit['conditions'][name]['adapter_sha256']:raise ValueError('Trained adapter changed')
+    # 读取结构化输入：'data/normalized/joint_validation_clean.jsonl'，保留原有样本身份字段。
     samples=select_samples(read_jsonl('data/normalized/joint_validation_clean.jsonl'))
+    # 读取结构化输入：'runs/accuracy-training-pool/samples.jsonl'，保留原有样本身份字段。
     source_samples=read_jsonl('runs/accuracy-training-pool/samples.jsonl')+read_jsonl('runs/tool-curriculum-v1/samples.jsonl')
     fps={table_fingerprint(s['table']) for s in source_samples}
     if any(table_fingerprint(s['table']) in fps for s in samples):raise ValueError('Transfer table overlaps known adapter training sources')
@@ -75,20 +87,24 @@ def main():
                         'PD/PC share weights but differ in prompt/interface and allowed calls.',
                         'RC/MC compare fixed data recipes, not an isolated innovation module.',
                         'M remains unadopted after WikiTQ regression; this probe cannot override that decision.']}
+    # 保存逐条结构化产物到 root / 'samples.jsonl'，供后续重放或审核读取。
     root.mkdir(parents=True);write_jsonl(root/'samples.jsonl',samples)
     (root/'protocol.json').write_text(json.dumps(protocol,ensure_ascii=False,indent=2),encoding='utf-8')
     (root/'run.json').write_text(json.dumps(metadata(protocol),indent=2),encoding='utf-8')
     outputs={name:[] for name in conditions}
     import torch
     for adapter_name in ['P','R','M']:
+        # 按已读取配置构造生成后端，实际模型身份和预算由该配置登记。
         model=make_model({**model_config,'adapter':str(adapters[adapter_name].resolve())})
         names=[name for name,c in conditions.items() if c['adapter']==adapter_name]
         for i,sample in enumerate(samples):
             ordered=names if i%2==0 else list(reversed(names))
             for name in ordered:
                 options={k:v for k,v in conditions[name].items() if k not in {'adapter','mode'}}
+                # 对当前样本运行完整推理入口，返回值包含答案、状态、错误和调用成本。
                 prediction=predict(sample,model,settings(conditions[name]['mode'],**options))
                 prediction['metrics']['latency_comparable']=False
+                # 保存逐条结构化产物到 root / f'{name}-predictions.jsonl'，供后续重放或审核读取。
                 outputs[name].append(prediction);write_jsonl(root/f'{name}-predictions.jsonl',outputs[name])
                 (root/'progress.json').write_text(json.dumps({k:len(v) for k,v in outputs.items()}))
                 print('FETAQA_TRANSFER',name,i+1,len(samples),prediction['status'],flush=True)

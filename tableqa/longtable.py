@@ -1,3 +1,5 @@
+# 模块职责：以有界局部视图驱动白名单查询，在完整原表上执行探查、统计和结果读出。
+# 接口约定：样本、操作和结果采用本项目的结构化字典；细节见各入口及字段检查。
 """Bounded student views and read-only execution over a complete DataBench table."""
 from dataclasses import dataclass
 from contextlib import closing
@@ -26,26 +28,40 @@ For open questions use all qualifying rows and derive categories by grouping or 
 Use candidate literals only when stated by the question. A probe can confirm real table values,
 but probe results do not grant permission to restrict an open question.
 Probe when allowed: {"probe":{"column":"c0","filters":[]}}.
-A plan can use {"result_id":"probe"} as a membership value only with matching question evidence."""
+A plan can use a returned probe ID, such as {"result_id":"probe_1"}, as a membership
+value only with matching question evidence."""
 
 
+# 用紧凑且拒绝非有限数的 JSON 序列化提示与监督目标。
+# 输入：value。
 def dump(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
+# 构造固定系统提示和阶段状态，维持采集与重放的可见输入一致。
+# 输入：question（原题文本）；phase；**state。
+# 返回形式含：列表记录。
 def messages(question, phase, **state):
     return [{"role": "system", "content": SYSTEM},
             {"role": "user", "content": dump({"phase": phase, "question": question, **state})}]
 
 
+# 按同一聊天模板计算完整输入 token，包含生成前缀。
+# 输入：tokenizer（学生分词器）；prompt。
 def prompt_length(tokenizer, prompt):
     return len(tokenizer.apply_chat_template(prompt, tokenize=True, add_generation_prompt=True))
 
 
+# 计算完整原表输入的基准长度，用于统一划分长表和短表。
+# 输入：sample（规范样本记录）；tokenizer（学生分词器）。
 def complete_input_tokens(sample, tokenizer):
     return prompt_length(tokenizer, messages(sample["question"], "answer", table=sample["table"]))
 
 
+# 按列、行及 token 三重上限构建样例视图，保留原始坐标。
+# 输入：table（原始表头与行矩阵）；tokenizer（学生分词器）；columns；strategy。
+# 返回形式含：view。
+# 异常约束：INVALID_VIEW
 def bounded_view(table, tokenizer, columns=None, strategy="head"):
     available = [f"c{i}" for i in range(len(table["headers"]))]
     columns = available[:8] if columns is None else columns
@@ -73,6 +89,8 @@ def bounded_view(table, tokenizer, columns=None, strategy="head"):
     return view
 
 
+# 优先使用数据适配器登记的类型，否则从实际单元格推断展示类型。
+# 输入：table（原始表头与行矩阵）；index。
 def column_type(table, index):
     if "types" in table:
         return table["types"][index]
@@ -80,12 +98,17 @@ def column_type(table, index):
     return "number" if type(value) in {int, float} else "boolean" if type(value) is bool else "text"
 
 
+# QueryError：携带结构化错误码的查询错误，供模型修复与诊断统计。
 class QueryError(ExecutionError):
+    # 初始化 QueryError 的依赖及持久状态；具体预算和身份字段见赋值。
+    # 输入：code；detail。
     def __init__(self, code, detail):
         super().__init__(detail)
         self.code = code
 
 
+# 核对题面是否包含完整候选值，兼顾词边界和中文值。
+# 输入：text（待解析文本）；value。
 def _contains_literal(text, value):
     # Word boundaries stop a quoted value such as "US" binding "Australia".
     literal = str(value).casefold()
@@ -94,13 +117,17 @@ def _contains_literal(text, value):
     return re.search(r"(?<!\w)" + re.escape(literal) + r"(?!\w)", text.casefold()) is not None
 
 
+# LongTable：每题独立的只读原表数据库、探查结果注册表与 CPU 计时。
 class LongTable:
     """The model supplies JSON. Identifiers are validated and SQL values are bound."""
+    # 初始化 LongTable 的依赖及持久状态；具体预算和身份字段见赋值。
+    # 输入：table（原始表头与行矩阵）；question（原题文本）。
     def __init__(self, table, question):
         self.question = question
         self.columns = {f"c{i}": column_type(table, i) for i in range(len(table["headers"]))}
         self.conn = sqlite3.connect(":memory:")
         self.probes = {}
+        self.probe_counter = 0
         self.seconds = {"cpu_probe_seconds": 0.0, "cpu_query_seconds": 0.0}
         affinities = {"text": "TEXT", "number": "NUMERIC", "boolean": "INTEGER"}
         schema = ",".join(f"{c} {affinities[t]}" for c, t in self.columns.items())
@@ -113,14 +140,23 @@ class LongTable:
             self.close()
             raise
 
+    # 释放当前题的数据库连接，结束其结果引用生命周期。
     def close(self):
         self.conn.close()
 
+    # 检查列名是否属于原表的稳定内部 ID，避免生成任意 SQL 标识符。
+    # 输入：column（稳定列 ID）。
+    # 返回形式含：column。
+    # 异常约束：INVALID_COLUMN
     def column(self, column):
         if not isinstance(column, str) or column not in self.columns:
             raise QueryError("INVALID_COLUMN", f"Unknown original column {column!r}")
         return column
 
+    # 验证题意绑定的筛选，编译参数化 WHERE 子句和独立参数列表。
+    # 输入：filters；enforce_scope（是否启用题意范围规则）。
+    # 返回形式含：2 项组成的结果。
+    # 异常约束：INVALID_FILTER
     def where(self, filters, enforce_scope):
         if not isinstance(filters, list) or len(filters) > 16:
             raise QueryError("INVALID_FILTER", "Expected up to 16 filter objects")
@@ -143,6 +179,8 @@ class LongTable:
             value = predicate.get("value")
             if membership and isinstance(value, dict) and set(value) == {"result_id"}:
                 result_id = value["result_id"]
+                if result_id == "probe" and self.probe_counter == 1:
+                    result_id = "probe_1"
                 ref = self.probes.get(result_id) if isinstance(result_id, str) else None
                 if ref is None or ref[0] != column:
                     raise QueryError("INVALID_REFERENCE", "Probe must refer to the same original column")
@@ -168,6 +206,9 @@ class LongTable:
             parameters.extend(values)
         return (" WHERE " + " AND ".join(clauses) if clauses else ""), parameters
 
+    # 执行只读 SQL 并累计对应 CPU 耗时，数据库错误转换为结构化错误。
+    # 输入：sql；parameters（独立绑定的查询参数）；metric。
+    # 异常约束：QUERY_ERROR
     def _read(self, sql, parameters, metric):
         before = perf_counter()
         try:
@@ -177,6 +218,10 @@ class LongTable:
         finally:
             self.seconds[metric] += perf_counter() - before
 
+    # 扫描指定合法行域的去重值，分配独立结果 ID 并保存在执行器内。
+    # 输入：spec；enforce_scope（是否启用题意范围规则）。
+    # 返回形式含：字段 id、values。
+    # 异常约束：INVALID_PROBE
     def probe(self, spec, enforce_scope=True):
         if not isinstance(spec, dict) or set(spec) - {"column", "filters"}:
             raise QueryError("INVALID_PROBE", "Expected column and optional filters")
@@ -186,9 +231,15 @@ class LongTable:
             f"SELECT DISTINCT {column} FROM original{where} ORDER BY {column}",
             parameters, "cpu_probe_seconds",
         )]
-        self.probes["probe"] = (column, values)
-        return values
+        self.probe_counter += 1
+        # ID 只在成功扫描后递增；已返回的结果长期保存在本题执行器中，互不覆盖。
+        probe_id = f"probe_{self.probe_counter}"
+        self.probes[probe_id] = (column, values)
+        return {"id": probe_id, "values": values}
 
+    # 校验查询计划的列、筛选、分组和输出字段，然后在只读原表上计算。
+    # 输入：plan（白名单查询计划）；enforce_scope（是否启用题意范围规则）。
+    # 异常约束：INVALID_PLAN
     def execute(self, plan, enforce_scope=True):
         if not isinstance(plan, dict) or set(plan) - {"filters", "by", "select", "order", "distinct"}:
             raise QueryError("INVALID_PLAN", "Expected one whitelisted query plan")
@@ -241,11 +292,14 @@ class LongTable:
         )
 
 
+# Protocol：第四章组别与消融配置，在构建时检查允许组合。
 @dataclass(frozen=True)
 class Protocol:
     group: str
     ablation: str = "none"
 
+    # 构造后立即检查字段和允许组合，使无效配置尽早失败。
+    # 异常约束：Invalid Chapter 4 experiment group
     def __post_init__(self):
         if self.group not in {"L0", "L1", "L2", "L3", "L4"} or self.ablation not in {
             "none", "no_probe", "generic_feedback", "no_repair_training",
@@ -253,6 +307,11 @@ class Protocol:
             raise ValueError("Invalid Chapter 4 experiment group")
 
 
+# 按视图、计划、可选探查、修订和读出阶段运行有界状态机。
+# 输入：sample（规范样本记录）；model（生成后端）；tokenizer（学生分词器）；protocol（冻结实验协议）；view；enforce_scope（是否启用题意范围规则）。
+# 相关调用：model.generate。
+# 返回形式含：字段 id、dataset、group、ablation、status、failure、answer。
+# 异常约束：CALL_LIMIT
 def predict_longtable(sample, model, tokenizer, protocol, *, view=None, enforce_scope=True):
     """Run the same state machine for generation and replayed supervision."""
     started = perf_counter()
@@ -286,6 +345,7 @@ def predict_longtable(sample, model, tokenizer, protocol, *, view=None, enforce_
                 state["result"] = {"id": "result", "columns": columns, "rows": len(stored_rows),
                                    "sample": stored_rows[:2]}
             prompt = messages(question, phase, **state)
+            # 长表界限使用学生 tokenizer，而非教师 tokenizer；所有组共享同一可见预算。
             n = prompt_length(tokenizer, prompt)
             if n > INPUT_LIMIT and phase == "read":
                 state["result"].pop("sample")
@@ -294,6 +354,7 @@ def predict_longtable(sample, model, tokenizer, protocol, *, view=None, enforce_
             if n > INPUT_LIMIT:
                 raise ContextLimitError(n, INPUT_LIMIT)
             if calls >= (5 if protocol.group == "L4" else 3):
+                # 探查后的续推理和修复也占用总调用预算，防止额外观察成为隐藏优势。
                 raise QueryError("CALL_LIMIT", "Model call budget exhausted")
             before = perf_counter()
             calls += 1
@@ -338,12 +399,14 @@ def predict_longtable(sample, model, tokenizer, protocol, *, view=None, enforce_
                         if protocol.group != "L4" or protocol.ablation == "no_probe" or probes or repairs:
                             raise QueryError("PROBE_NOT_AVAILABLE", "Generate a plan from current observations")
                         probes += 1
-                        values = query.probe(value["probe"], enforce_scope)
-                        probe_feedback = {"id": "probe", "count": len(values), "values": values,
+                        result = query.probe(value["probe"], enforce_scope)
+                        values = result["values"]
+                        probe_feedback = {"id": result["id"], "count": len(values), "values": values,
                                           "complete_in_prompt": True}
                         candidate = messages(question, "plan", view=view, probe=probe_feedback, feedback=None,
                                              allow_probe=False)
                         if prompt_length(tokenizer, candidate) > INPUT_LIMIT:
+                            # 完整去重集合仍留在执行器；提示只传结果 ID、数量和少量示例。
                             probe_feedback.update(values=values[:3], complete_in_prompt=False)
                             candidate = messages(question, "plan", view=view, probe=probe_feedback, feedback=None,
                                                  allow_probe=False)
@@ -394,6 +457,9 @@ def predict_longtable(sample, model, tokenizer, protocol, *, view=None, enforce_
             "view": view, "first_plan": first_plan, "attempts": attempts, "trace": traces, "metrics": metrics}
 
 
+# 在新的只读原表执行器内重放同一计划，可切换范围规则用于离线诊断。
+# 输入：sample（规范样本记录）；plan（白名单查询计划）；enforce_scope（是否启用题意范围规则）；probe_spec。
+# 返回形式含：字段 rows、error。
 def replay_plan(sample, plan, *, enforce_scope=True, probe_spec=None):
     with closing(LongTable(sample["table"], sample["question"])) as query:
         try:

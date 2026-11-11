@@ -1,3 +1,5 @@
+# 脚本用途：在真实教师池上统计条件保护压缩和分块的离线代理成本。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Offline mechanism audit on real teacher trajectories, no synthetic padding."""
 import argparse
 from collections import Counter
@@ -8,12 +10,18 @@ from tableqa.data import read_jsonl,write_jsonl,digest
 from tableqa.optimization import optimize_operations,state_cost_partition,effective_fixed_blocks
 
 
+# 解析当前脚本参数，按模块说明执行本次冻结阶段并保存产物。
+# 相关调用：read_jsonl、AutoTokenizer.from_pretrained、(root / 'report.json').write_text、(root / 'COMPLETE').write_text。
+# 异常约束：Preserve previous mechanism audit
 def main():
+    # 定义本入口的参数解析器；位置参数、默认值和允许取值由相邻 add_argument 明确声明。
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('output');args=p.parse_args();root=Path(args.output)
     if root.exists():raise ValueError('Preserve previous mechanism audit')
+    # 读取结构化输入：source / 'samples.jsonl'，保留原有样本身份字段。
     source=Path('runs/accuracy-training-pool');samples=read_jsonl(source/'samples.jsonl');predictions=read_jsonl(source/'predictions.jsonl')
     lookup={(r['dataset'],r['id']):r for r in predictions}
     from transformers import AutoTokenizer
+    # 使用本阶段指定的 tokenizer；预算、提示模板与监督掩码应沿用同一版本。
     tokenizer=AutoTokenizer.from_pretrained('models/Qwen2.5-3B-Instruct',local_files_only=True)
     root.mkdir();details=[]
     for i,sample in enumerate(samples):
@@ -32,6 +40,7 @@ def main():
             'fixed_boundaries':[len(g) for g in fixed],'state_boundaries':[len(g) for g in sensitive],
             'feedback_flags':sum(bool(op.get('requires_feedback')) for op in operations),
             'search_certificate':certificate})
+        # 保存逐条结构化产物到 root / 'per-source.jsonl'，供后续重放或审核读取。
         write_jsonl(root/'per-source.jsonl',details)
         if (i+1)%20==0:print('GUARDED_POOL_AUDIT',i+1,len(samples),flush=True)
     summary={'offline_only':True,'no_semantic_correctness_claim':True,'uses_future_teacher_chain_offline':True,

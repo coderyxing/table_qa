@@ -1,11 +1,15 @@
 # Conservative initial Linux / Python 3.10-3.12 environment.
 # Candidate pins: validate on GPU12, then retain the generated pip freeze.
+# 服务器候选锁定版本。部署前核对 CUDA、驱动及虚拟环境，运行时另存实际依赖清单。
 torch==2.5.1
+# 生成与训练框架；梯度累积的归一化由项目训练器显式实现。
 transformers==4.46.3
 tokenizers==0.20.3
+# 以下为 LoRA、设备分片、权重序列化和数值运算依赖。
 peft==0.13.2
 accelerate==1.1.1
 safetensors==0.4.5
 numpy==1.26.4
 sacrebleu==2.4.3
+# 自由文本自动指标的分词签名和尺度随报告保存。
 rouge-score==0.1.2

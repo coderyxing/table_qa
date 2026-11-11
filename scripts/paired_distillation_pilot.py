@@ -1,3 +1,5 @@
+# 脚本用途：在完全相同且经重放的教师来源上构建 B2/B5 试跑。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """B2/B5 engineering pilot from the SAME replay-checked source sample IDs.
 
 One epoch and equal original examples, NOT equal token budgets or thesis results.
@@ -20,16 +22,20 @@ from tableqa.inference import predict
 from tableqa.experiments import settings
 from tableqa.evaluation import evaluate
 
+# 定义本入口的参数解析器；位置参数、默认值和允许取值由相邻 add_argument 明确声明。
 parser=argparse.ArgumentParser(); parser.add_argument('--output',default='runs/paired-distillation-pilot')
 parser.add_argument('--source',default='runs/teacher-pilot-fresh30')
 parser.add_argument('--epochs',type=int,default=1); parser.add_argument('--rank',type=int,default=8)
+# 解析本次命令的实际参数，后续样本路径和实验开关均由此确定。
 parser.add_argument('--eval-per-dataset',type=int,default=3); args=parser.parse_args()
 source=Path(args.source); root=Path(args.output)
 if not (source/'report.json').exists(): raise RuntimeError('Fresh teacher run has not completed')
 if root.exists(): raise ValueError('Output directory exists; inspect it before rerunning')
 root.mkdir()
+# 读取结构化输入：source / 'samples.jsonl'，保留原有样本身份字段。
 samples={(r['dataset'],r['id']):r for r in read_jsonl(source/'samples.jsonl')}
 model_path=str(Path('models/Qwen2.5-3B-Instruct').resolve())
+# 使用本阶段指定的 tokenizer；预算、提示模板与监督掩码应沿用同一版本。
 tokenizer=AutoTokenizer.from_pretrained(model_path,local_files_only=True)
 training={'B2':[],'B5':[]}; accepted=[]; audits=[]
 for prediction in read_jsonl(source/'predictions.jsonl'):
@@ -45,14 +51,18 @@ for prediction in read_jsonl(source/'predictions.jsonl'):
         audit['decision']='rejected'; audit['reasons']=['paired_training_context_limit']; continue
     accepted.append({'dataset':sample['dataset'],'id':sample['id']})
     for mode in training: training[mode]+=records[mode]
+# 保存逐条结构化产物到 root / 'audit.jsonl'，供后续重放或审核读取。
 write_jsonl(root/'audit.jsonl',audits); write_jsonl(root/'accepted-samples.jsonl',accepted)
 if len(accepted)<2: raise RuntimeError('Too few valid original samples; no model is trained')
+# 保存逐条结构化产物到 root / f'{mode}-records.jsonl'，供后续重放或审核读取。
 for mode,records in training.items():write_jsonl(root/f'{mode}-records.jsonl',records)
 # Draw source validation samples, preserve failures and never inspect official test answers.
+# 读取结构化输入：'data/normalized/joint_validation_clean.jsonl'，保留原有样本身份字段。
 validation=read_jsonl('data/normalized/joint_validation_clean.jsonl'); evaluation=[]
 for dataset in sorted({r['dataset'] for r in accepted}):
     candidates=sorted([r for r in validation if r['dataset']==dataset],key=lambda r:r['id'])
     random.Random(123).shuffle(candidates); evaluation+=candidates[:args.eval_per_dataset]
+# 保存逐条结构化产物到 root / 'validation-samples.jsonl'，供后续重放或审核读取。
 write_jsonl(root/'validation-samples.jsonl',evaluation)
 report={'pilot_only':True,'budget':f'equal_original_examples_{args.epochs}_epochs_NOT_equal_tokens',
         'accepted_original_samples':len(accepted),'datasets_covered':sorted({r['dataset'] for r in accepted}),
@@ -63,12 +73,15 @@ for mode in training:
     directory=root/mode; directory.mkdir()
     (directory/'run.json').write_text(json.dumps(metadata(config),indent=2))
     torch.cuda.reset_peak_memory_stats()
+    # 执行当前配置的训练阶段，输出检查点与实际训练记录统计。
     statistics=train(config,training[mode],directory/'adapter')
     gc.collect(); torch.cuda.empty_cache()
     backend=LocalModel(model_path,adapter=str(directory/'adapter'),max_new_tokens=512)
     predictions=[]
     for sample in evaluation:
+        # 对当前样本运行完整推理入口，返回值包含答案、状态、错误和调用成本。
         predictions.append(predict(sample,backend,settings(mode)))
+        # 保存逐条结构化产物到 directory / 'validation-predictions.jsonl'，供后续重放或审核读取。
         write_jsonl(directory/'validation-predictions.jsonl',predictions)
     report['models'][mode]={'training':statistics,'validation':evaluate(predictions,evaluation)}
     del backend; gc.collect(); torch.cuda.empty_cache()

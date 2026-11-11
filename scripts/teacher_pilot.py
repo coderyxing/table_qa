@@ -1,3 +1,5 @@
+# 脚本用途：在少量真实训练题上检查 32B 教师的可执行轨迹质量。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Six source-training examples to inspect 32B executable trajectory quality."""
 import json
 from pathlib import Path
@@ -9,6 +11,7 @@ from tableqa.models import LocalModel
 from tableqa.inference import predict
 from tableqa.experiments import settings
 from tableqa.evaluation import evaluate
+# 定义本入口的参数解析器；位置参数、默认值和允许取值由相邻 add_argument 明确声明。
 parser=argparse.ArgumentParser()
 parser.add_argument('--model',default='models/Qwen2.5-32B-Instruct')
 parser.add_argument('--output',default='runs/teacher-pilot')
@@ -18,16 +21,21 @@ parser.add_argument('--seed',type=int,default=42)
 parser.add_argument('--exclude-samples')
 parser.add_argument('--samples-file')
 parser.add_argument('--mode',default='A4',choices=['A0','A1','A2','A3','A4'])
+# 解析本次命令的实际参数，后续样本路径和实验开关均由此确定。
 args=parser.parse_args()
 out=Path(args.output); out.mkdir(parents=True,exist_ok=True)
 if (out/'predictions.jsonl').exists(): raise ValueError('Pilot output exists; choose a fresh output directory')
+# 读取结构化输入：'data/normalized/joint_train_clean.jsonl'，保留原有样本身份字段。
 data=read_jsonl('data/normalized/joint_train_clean.jsonl'); selected=[]
+# 读取结构化输入：args.exclude_samples，保留原有样本身份字段。
 excluded={(r['dataset'],r['id']) for r in read_jsonl(args.exclude_samples)} if args.exclude_samples else set()
 for dataset in ['wikitq','tabfact','fetaqa']:
     candidates=sorted([r for r in data if r['dataset']==dataset and len(r['table']['rows'])<=30 and (r['dataset'],r['id']) not in excluded],key=lambda r:r['id'])
     random.Random(args.seed).shuffle(candidates); selected+=candidates[:args.per_dataset]
+# 保存逐条结构化产物到 out / 'samples.jsonl'，供后续重放或审核读取。
 write_jsonl(out/'samples.jsonl',selected)
 if args.samples_file:
+    # 读取结构化输入：args.samples_file，保留原有样本身份字段。
     selected=read_jsonl(args.samples_file)
     if any(r['split']!='train' for r in selected): raise ValueError('This pilot uses source training samples only')
     write_jsonl(out/'samples.jsonl',selected)
@@ -36,7 +44,9 @@ config={'model':str(Path(args.model).resolve()),'max_new_tokens':1024,'max_input
 model=LocalModel(config['model'],max_new_tokens=1024,max_input_tokens=args.max_input_tokens,device_map='balanced')
 predictions=[]
 for r in selected:
+    # 对当前样本运行完整推理入口，返回值包含答案、状态、错误和调用成本。
     predictions.append(predict(r,model,settings(args.mode)))
+    # 保存逐条结构化产物到 out / 'predictions.jsonl'，供后续重放或审核读取。
     write_jsonl(out/'predictions.jsonl',predictions)
 report={'pilot_only':True,'split':'train','metrics':evaluate(predictions,selected)}
 (out/'report.json').write_text(json.dumps(report,indent=2))

@@ -1,3 +1,5 @@
+# 模块职责：严格解析完整单元格中的数值和单位，处理可追溯的数量转换及工具提示。
+# 接口约定：样本、操作和结果采用本项目的结构化字典；细节见各入口及字段检查。
 """Explicit quantity conversions; never infer a unit from a question or label.
 
 Only full-cell, whitelisted quantities are accepted. This is an experimental
@@ -8,6 +10,7 @@ from decimal import Decimal, DecimalException, Inexact, localcontext
 import re
 
 
+# QuantityError：数量解析或单位转换违反约束时抛出的执行错误。
 class QuantityError(ValueError):
     pass
 
@@ -36,6 +39,8 @@ _NUMBER = r'[+-]?(?:(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?|\.[0-9]+)(?
 _CELL = re.compile(rf'(?P<number>{_NUMBER})\s*(?P<scale>thousand|million|billion)?\s*(?P<unit>[a-zA-Z]+|%)?', re.IGNORECASE)
 
 
+# 查找或规范化受支持单位，保留严格的数量类型约束。
+# 输入：name。
 def _unit(name):
     if not isinstance(name, str):
         raise QuantityError(f'Unsupported explicit unit: {name!r}')
@@ -47,15 +52,21 @@ def _unit(name):
     return _UNITS[key]
 
 
+# Quantity：保存十进制数值、单位及转换所需的数量类型。
 @dataclass(frozen=True)
 class Quantity:
+    # raw 保留来源值；value 统一到规范基准单位，换算前必须核对 dimension。
     raw: object
     value: Decimal  # Value in the canonical base unit.
     dimension: str
     base_unit: str
     source_unit: str
+    # 显式记录是否借用了外部声明单位，以便审核纯数值单元格的解析依据。
     assumed_unit_used: bool
 
+    # 检查数量类型与目标单位兼容后，返回换算后的数量对象。
+    # 输入：target_unit。
+    # 异常约束：Conversion requires unsupported inexact decimal rounding
     def in_unit(self, target_unit):
         dimension, _, factor = _unit(target_unit)
         if dimension != self.dimension:
@@ -69,6 +80,9 @@ class Quantity:
             raise QuantityError('Conversion requires unsupported inexact decimal rounding') from exc
 
 
+# 解析完整单元格及显式来源单位，拒绝范围、脚注和混杂文本。
+# 输入：value；source_unit。
+# 异常约束：Quantity requires a finite number or full-cell string
 def parse_quantity(value, source_unit=None):
     """Parse one complete cell; source_unit applies ONLY to a unitless cell.
 
@@ -106,11 +120,15 @@ def parse_quantity(value, source_unit=None):
                     match['unit'] is None and source_unit is not None)
 
 
+# 把数量转换成原执行器可读的无损十进制文本。
+# 输入：value；target_unit；source_unit。
 def quantity_text(value, target_unit, source_unit=None):
     """Return a lossless decimal string usable by the existing numeric executor."""
     return format(parse_quantity(value, source_unit).in_unit(target_unit), 'f')
 
 
+# 检查操作是否使用数量工具，以验证提示和能力开关匹配。
+# 输入：value。
 def uses_quantities(value):
     if isinstance(value, dict):
         return value.get('op') == 'quantity' or any(uses_quantities(v) for v in value.values())

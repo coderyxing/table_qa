@@ -1,3 +1,5 @@
+# 脚本用途：从已完成课程报告生成可导出的 PNG/SVG 科研图。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Standalone scientific PNG/SVG figures from a completed pilot, no model calls."""
 import argparse
 import json
@@ -8,7 +10,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
+# 解析当前脚本参数，按模块说明执行本次冻结阶段并保存产物。
+# 相关调用：(root / 'evaluation' / 'report.json').read_text、(root / f'training-{name}' / 'adapter' / 'training_history.json').read_text。
+# 异常约束：Only completed experiments may be plotted
 def main():
+    # 定义本入口的参数解析器；位置参数、默认值和允许取值由相邻 add_argument 明确声明。
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('root');args=p.parse_args();root=Path(args.root)
     report=json.loads((root/'evaluation'/'report.json').read_text())
     if not (root/'COMPLETE').exists():raise ValueError('Only completed experiments may be plotted')

@@ -1,3 +1,5 @@
+# 脚本用途：冻结来源与题型后，比较抽取工具及合成演示对真实训练题的影响。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Predeclared train-only diagnostic of extraction tools and synthetic demos."""
 import argparse
 from dataclasses import asdict
@@ -14,6 +16,9 @@ from tableqa.inference import predict
 from tableqa.semantic_columns import extract_span, ExtractionError, uses_extraction
 
 
+# 按题面或表格特征生成固定的能力诊断类别。
+# 输入：sample（规范样本记录）。
+# 返回形式含：None / 'parenthesized_code' / 'ordinal_rank'。
 def category(sample):
     """Public-input heuristic, NOT a human label of tool necessity or correctness."""
     question = sample['question'].casefold()
@@ -46,6 +51,10 @@ def category(sample):
     return None
 
 
+# 按预先声明的来源和表格规则选题，保持开发队列可追溯。
+# 输入：rows；n_per_category；seed（随机种子）。
+# 返回形式含：2 项组成的结果。
+# 异常约束：Positive per-category cap required
 def select_samples(rows, n_per_category=2, seed=2032):
     if type(n_per_category) is not int or n_per_category < 1:
         raise ValueError('Positive per-category cap required')
@@ -74,15 +83,21 @@ def select_samples(rows, n_per_category=2, seed=2032):
     return selected, annotations
 
 
+# 解析当前脚本参数，按模块说明执行本次冻结阶段并保存产物。
+# 相关调用：write_jsonl、(root / 'protocol.json').write_text、(root / 'run.json').write_text、(root / 'diagnostic.json').write_text。
+# 异常约束：Output exists; do not alter or rerun this frozen diagnostic
 def main():
+    # 定义本入口的参数解析器；位置参数、默认值和允许取值由相邻 add_argument 明确声明。
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('data'); p.add_argument('model'); p.add_argument('output')
     p.add_argument('--n-per-category', type=int, default=2)
     p.add_argument('--seed', type=int, default=2032)
     p.add_argument('--prepare-only', action='store_true')
+    # 解析本次命令的实际参数，后续样本路径和实验开关均由此确定。
     args = p.parse_args(); root = Path(args.output)
     if root.exists():
         raise ValueError('Output exists; do not alter or rerun this frozen diagnostic')
+    # 读取结构化输入：args.data，保留原有样本身份字段。
     samples, annotations = select_samples(read_jsonl(args.data), args.n_per_category, args.seed)
     configs = {name: settings('A4', semantic_extract=tools, tool_demonstrations=demos, max_repairs=1)
                for name, tools, demos in [('plain', False, False), ('tools', True, False),
@@ -102,21 +117,25 @@ def main():
                                'Are process and answer failures reduced on these inputs?'],
                 'limits': 'Small heuristic training subset; copied text does not prove semantic correctness; no faithful Chain-of-Table comparison in this diagnostic.'}
     root.mkdir(parents=True)
+    # 保存逐条结构化产物到 root / 'samples.jsonl'，供后续重放或审核读取。
     write_jsonl(root / 'samples.jsonl', samples); write_jsonl(root / 'categories.jsonl', annotations)
     (root / 'protocol.json').write_text(json.dumps(protocol, ensure_ascii=False, indent=2), encoding='utf-8')
     (root / 'run.json').write_text(json.dumps(metadata(protocol), ensure_ascii=False, indent=2), encoding='utf-8')
     if args.prepare_only:
         print('SEMANTIC_DIAGNOSTIC_PREPARED', len(samples), flush=True); return
     from tableqa.models import make_model
+    # 按已读取配置构造生成后端，实际模型身份和预算由该配置登记。
     model = make_model(model_config); outputs = {name: [] for name in configs}; names = list(configs)
     for i, item in enumerate(samples):
         offset = i % len(names)
         for name in names[offset:] + names[:offset]:
+            # 对当前样本运行完整推理入口，返回值包含答案、状态、错误和调用成本。
             result = predict(item, model, configs[name])
             result['metrics']['latency_comparable'] = False
             result['extraction_used_in_committed_chain'] = uses_extraction(result['operations'])
             result['extraction_mentioned_in_response'] = any('"extract"' in r['text'] for r in result['responses'])
             outputs[name].append(result)
+            # 保存逐条结构化产物到 root / f'{name}-predictions.jsonl'，供后续重放或审核读取。
             write_jsonl(root / f'{name}-predictions.jsonl', outputs[name])
             (root / 'progress.json').write_text(json.dumps({k: len(v) for k, v in outputs.items()}), encoding='utf-8')
             print(json.dumps({'condition': name, 'id': item['id'], 'status': result['status'],

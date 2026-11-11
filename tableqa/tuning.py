@@ -1,8 +1,14 @@
+# 模块职责：按固定规则选择准确率开发和确认队列，记录历史已接触来源。
+# 接口约定：样本、操作和结果采用本项目的结构化字典；细节见各入口及字段检查。
 """Validation-only cohorts, disjoint by whole-table content and selected without labels."""
 import random
 from .data import table_fingerprint
 
 
+# 从允许划分中按规则抽取开发与确认队列，排除历史接触来源。
+# 输入：records（规范记录序列）；previous；per_task；seed（随机种子）。
+# 返回形式含：out。
+# 异常约束：Positive cohort size required
 def accuracy_cohorts(records,previous,per_task=100,seed=2030):
     if type(per_task) is not int or per_task<1:raise ValueError('Positive cohort size required')
     if any(r['split']!='validation' for r in records):raise ValueError('Accuracy tuning must use validation only')

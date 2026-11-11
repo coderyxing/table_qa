@@ -1,3 +1,5 @@
+# 脚本用途：在训练题上进行有界的单位与数量转换配对诊断。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Bounded, train-only paired capability diagnostic, not a benchmark result.
 
 Inputs are selected without questions' labels or prediction scores. Both
@@ -18,6 +20,10 @@ from tableqa.inference import predict
 from tableqa.quantities import parse_quantity, QuantityError, uses_quantities
 
 
+# 按预先声明的来源和表格规则选题，保持开发队列可追溯。
+# 输入：rows；n_per_task；seed（随机种子）。
+# 返回形式含：selected。
+# 异常约束：A positive sample cap is required
 def select_samples(rows, n_per_task=4, seed=2031):
     if type(n_per_task) is not int or n_per_task < 1:
         raise ValueError('A positive sample cap is required')
@@ -49,16 +55,22 @@ def select_samples(rows, n_per_task=4, seed=2031):
     return selected
 
 
+# 解析当前脚本参数，按模块说明执行本次冻结阶段并保存产物。
+# 相关调用：write_jsonl、(out / 'protocol.json').write_text、(out / 'run.json').write_text、(out / 'diagnostic.json').write_text。
+# 异常约束：Output already exists; preserve the frozen diagnostic
 def main():
+    # 定义本入口的参数解析器；位置参数、默认值和允许取值由相邻 add_argument 明确声明。
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('data'); parser.add_argument('model'); parser.add_argument('output')
     parser.add_argument('--n-per-task', type=int, default=4)
     parser.add_argument('--seed', type=int, default=2031)
     parser.add_argument('--prepare-only', action='store_true')
+    # 解析本次命令的实际参数，后续样本路径和实验开关均由此确定。
     args = parser.parse_args()
     out = Path(args.output)
     if out.exists():
         raise ValueError('Output already exists; preserve the frozen diagnostic')
+    # 读取结构化输入：args.data，保留原有样本身份字段。
     samples = select_samples(read_jsonl(args.data), args.n_per_task, args.seed)
     out.mkdir(parents=True)
     model_config = {'backend': 'local', 'model': str(Path(args.model).resolve()),
@@ -77,6 +89,7 @@ def main():
                 'formal_latency_benchmark': False,
                 'changes': 'quantity prompt and whitelisted expression availability only',
                 'limits': 'Selected tables may contain quantities irrelevant to the question. No overall benchmark or novelty claim.'}
+    # 保存逐条结构化产物到 out / 'samples.jsonl'，供后续重放或审核读取。
     write_jsonl(out / 'samples.jsonl', samples)
     (out / 'protocol.json').write_text(json.dumps(protocol, ensure_ascii=False, indent=2), encoding='utf-8')
     (out / 'run.json').write_text(json.dumps(metadata(protocol), ensure_ascii=False, indent=2), encoding='utf-8')
@@ -84,15 +97,18 @@ def main():
         print('PREPARED', len(samples), flush=True)
         return
     from tableqa.models import make_model
+    # 按已读取配置构造生成后端，实际模型身份和预算由该配置登记。
     model = make_model(model_config)
     outputs = {name: [] for name in configs}
     for i, sample in enumerate(samples):
         order = ['plain', 'quantity'] if i % 2 == 0 else ['quantity', 'plain']
         for name in order:
+            # 对当前样本运行完整推理入口，返回值包含答案、状态、错误和调用成本。
             result = predict(sample, model, configs[name])
             result['metrics']['latency_comparable'] = False
             result['quantity_expression_used'] = uses_quantities(result['operations'])
             outputs[name].append(result)
+            # 保存逐条结构化产物到 out / f'{name}-predictions.jsonl'，供后续重放或审核读取。
             write_jsonl(out / f'{name}-predictions.jsonl', outputs[name])
             progress = {k: len(v) for k, v in outputs.items()}
             (out / 'progress.json').write_text(json.dumps(progress), encoding='utf-8')

@@ -1,3 +1,5 @@
+# 模块职责：执行单卡 BF16 LoRA，显式控制目标掩码、梯度累积、来源曝光和监督类型损失。
+# 接口约定：样本、操作和结果采用本项目的结构化字典；细节见各入口及字段检查。
 """Single-GPU BF16 LoRA with per-example target normalization and typed losses."""
 import json
 import random
@@ -6,6 +8,10 @@ from pathlib import Path
 from .data import digest
 
 
+# 按监督类型平衡记录，再用固定种子顺序选取完整目标以满足预算。
+# 输入：encoded（已编码并带损失掩码的记录）；seed（随机种子）；target_token_budget；sampling_policy。
+# 返回形式含：2 项组成的结果。
+# 异常约束：Unknown sampling policy
 def balance_and_budget(encoded, seed=42, target_token_budget=None, sampling_policy='replacement'):
     if sampling_policy not in {'replacement','coverage'}:raise ValueError('Unknown sampling policy')
     by_kind = {k:[x for x in encoded if x["kind_id"] == k] for k in (0,1)}
@@ -37,6 +43,10 @@ def balance_and_budget(encoded, seed=42, target_token_budget=None, sampling_poli
     return selected,count
 
 
+# 补齐完整梯度累积批次，并在对齐后重新核对 token 上限。
+# 输入：encoded（已编码并带损失掩码的记录）；multiple；token_budget。
+# 返回形式含：2 项组成的结果。
+# 异常约束：Effective batch size must be positive
 def align_accumulation_batches(encoded, multiple, token_budget=None):
     """Avoid older Trainer versions dropping the last partial accumulation batch."""
     if multiple<1: raise ValueError('Effective batch size must be positive')
@@ -50,6 +60,10 @@ def align_accumulation_batches(encoded, multiple, token_budget=None):
     return rows,{'padding_records':padding,'dropped_budget_records':dropped,'supervised_tokens_per_epoch':tokens(rows)}
 
 
+# 独立编码提示和目标，给提示置 -100 掩码并给目标附加 EOS。
+# 输入：record；tokenizer（学生分词器）；max_length（序列 token 上限）。
+# 返回形式含：字段 input_ids、attention_mask、labels、kind_id、source_key、source_label。
+# 异常约束：Empty prompt/target
 def encode_record(record, tokenizer, max_length):
     prefix = tokenizer.apply_chat_template(record["messages"], tokenize=False, add_generation_prompt=True)
     # Encode the target separately so the prompt/target boundary is exact.
@@ -63,11 +77,19 @@ def encode_record(record, tokenizer, max_length):
             "source_key": (record.get('dataset','unknown'),record['id']),"source_label":record.get('sampling_label')}
 
 
+# 计算均值为一的任务、监督类型及验证标签权重，保留原采样顺序。
+# 输入：encoded（已编码并带损失掩码的记录）；policy。
+# 返回形式含：2 项组成的结果 / 3 项组成的结果。
+# 异常约束：Unknown loss balancing policy
 def attach_loss_weights(encoded,policy='none'):
     """Mean-one weights for task/kind/verification-label strata; no new sampling."""
     if policy not in {'none','task_label'}:raise ValueError('Unknown loss balancing policy')
     if policy=='none':return encoded,[]
     groups=Counter()
+    # 从当前记录提取分组、排序或缓存使用的键。
+    # 输入：row（当前行记录）。
+    # 返回形式含：3 项组成的结果。
+    # 异常约束：Task/label balancing requires explicit training-only TabFact labels
     def key(row):
         dataset=row['source_key'][0];label=row.get('source_label') if dataset=='tabfact' else None
         if dataset=='tabfact' and (type(label) is not int or label not in (0,1)):
@@ -83,6 +105,11 @@ def attach_loss_weights(encoded,policy='none'):
     return result,report
 
 
+# 在加载 GPU 前执行编码、平衡、预算和批次对齐，登记真实来源曝光。
+# 输入：config（显式运行配置）；records（规范记录序列）；tokenizer（学生分词器）。
+# 相关调用：digest。
+# 返回形式含：2 项组成的结果。
+# 异常约束：Frozen schedules cannot be cropped by a second token budget
 def prepare_training_data(config,records,tokenizer):
     """Exact pre-GPU sampling audit. Retains the existing sampler/ordering."""
     encoded=[encode_record(r,tokenizer,config.get('max_seq_length',4096)) for r in records]
@@ -130,6 +157,11 @@ def prepare_training_data(config,records,tokenizer):
     return encoded,stats
 
 
+# 延迟导入训练依赖，定义按样本目标归一并显式处理累积梯度的 Trainer。
+# 输入：config（显式运行配置）；has_both_kinds。
+# 相关调用：model.train、self.optimizer.train。
+# 返回形式含：TypedTrainer。
+# 异常约束：Explicit mean trainer supports ordinary single-device Accelerate only
 def make_typed_trainer_class(config,has_both_kinds):
     """Lazy optional dependencies; explicit mean over a complete accumulation.
 
@@ -141,19 +173,28 @@ def make_typed_trainer_class(config,has_both_kinds):
     import torch
     import torch.nn.functional as F
     from transformers import Trainer
+    # TypedTrainer：实现本项目按样本归一的损失与显式微批次平均。
     class TypedTrainer(Trainer):
+        # 将移位后的目标 token 损失归一到每个样本，再按答案类型和任务权重求均值。
+        # 输入：model（生成后端）；inputs；return_outputs；**kwargs。
         def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
             kinds=inputs.pop("kind_id"); labels=inputs.pop("labels");sample_weights=inputs.pop('sample_weight')
             outputs=model(**inputs)
             logits=outputs.logits[:,:-1].contiguous().float(); targets=labels[:,1:].contiguous()
+            # 自回归预测对齐下一 token。-100 标记的提示和 padding 不计入交叉熵。
             per_token=F.cross_entropy(logits.view(-1,logits.size(-1)),targets.view(-1),
                                      reduction="none",ignore_index=-100).view_as(targets)
             mask=targets.ne(-100); per_example=per_token.sum(-1)/mask.sum(-1).clamp(min=1)
+            # 先对每个样本的目标长度归一，再加类型及任务权重，避免长目标自动占更大权重。
             weights=torch.where(kinds.eq(1),float(config.get("answer_weight",1)),1.)
             factor=2. if has_both_kinds else 1.
             loss=(per_example*weights*sample_weights).mean()*factor
             return (loss,outputs) if return_outputs else loss
 
+        # 处理单卡微批次反向传播，抵消 Accelerate 除数后按配置的累积步数取平均。
+        # 输入：model（生成后端）；inputs；num_items_in_batch。
+        # 相关调用：model.train、self.optimizer.train。
+        # 异常约束：Explicit mean trainer supports ordinary single-device Accelerate only
         def training_step(self,model,inputs,num_items_in_batch=None):
             if self.use_apex or self.is_deepspeed_enabled or self.args.n_gpu>1:
                 raise RuntimeError('Explicit mean trainer supports ordinary single-device Accelerate only')
@@ -171,6 +212,11 @@ def make_typed_trainer_class(config,has_both_kinds):
     return TypedTrainer
 
 
+# 加载底座与 LoRA，在单 GPU 上训练并保存权重、日志、曝光和配置。
+# 输入：config（显式运行配置）；records（规范记录序列）；output（输出位置）；validation。
+# 相关调用：AutoTokenizer.from_pretrained、prepare_training_data、AutoModelForCausalLM.from_pretrained、make_typed_trainer_class。
+# 返回形式含：字段 peak_allocated_bytes / result。
+# 异常约束：Non-training record supplied
 def train(config, records, output, validation=None):
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, set_seed
@@ -182,6 +228,7 @@ def train(config, records, output, validation=None):
     set_seed(config.get("seed",42))
     if not torch.cuda.is_available(): raise RuntimeError("GPU training requires CUDA; use demo for CPU verification")
     if torch.cuda.device_count()!=1: raise RuntimeError('Single-GPU trainer: select one GPU with CUDA_VISIBLE_DEVICES')
+    # 使用本阶段指定的 tokenizer；预算、提示模板与监督掩码应沿用同一版本。
     tokenizer = AutoTokenizer.from_pretrained(config["model"], revision=config.get("revision"))
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
@@ -192,6 +239,7 @@ def train(config, records, output, validation=None):
     model = AutoModelForCausalLM.from_pretrained(config["model"], revision=config.get("revision"),
                 torch_dtype=torch.bfloat16)
     model.config.use_cache=False
+    # 训练启用梯度检查点时关闭 KV cache，减少与推理缓存机制的冲突。
     if config.get("initial_adapter"):
         from peft import PeftModel
         model = PeftModel.from_pretrained(model,config["initial_adapter"],is_trainable=True)
@@ -199,6 +247,9 @@ def train(config, records, output, validation=None):
         model = get_peft_model(model,LoraConfig(task_type="CAUSAL_LM",r=config.get("lora_rank",32),
                     lora_alpha=config.get("lora_alpha",64),lora_dropout=.05,target_modules="all-linear"))
     if hasattr(model,"enable_input_require_grads"): model.enable_input_require_grads()
+    # 按当前批次最长序列右侧补齐输入、注意力和标签，补齐标签使用 -100。
+    # 输入：batch。
+    # 返回形式含：result。
     def collate(batch):
         length=max(len(x["input_ids"]) for x in batch); result={}
         for key,pad in (("input_ids",tokenizer.pad_token_id),("attention_mask",0),("labels",-100)):

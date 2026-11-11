@@ -1,3 +1,5 @@
+# 模块职责：在独立进程内加载已校验的上游 Chain-of-Table 源码，适配本地文本模型及 TabFact 输出。
+# 接口约定：样本、操作和结果采用本项目的结构化字典；细节见各入口及字段检查。
 """Local text-backend adapter for a pinned official Chain-of-Table checkout.
 
 Upstream files/prompts remain separate and retain their licenses. This module
@@ -20,6 +22,9 @@ PINNED_COMMIT = '1fd716c608f56e7d9d156ead432219c7ab9008af'
 SYSTEM = 'I will give you some examples, you need to follow the examples and complete the text, and no other content.'
 
 
+# 只解析上游已知静态分派名或 Python 字面量，拒绝动态表达式执行。
+# 输入：text（待解析文本）；scope。
+# 异常约束：Bounded source literal or static operation name required
 def safe_source_eval(text, scope):
     """Resolve known static dispatch names; parse all other inputs as literals."""
     allowed = {'add_column_act', 'select_row_act', 'select_column_act',
@@ -33,6 +38,11 @@ def safe_source_eval(text, scope):
     return ast.literal_eval(text)
 
 
+# 按冻结提交与文件摘要核验上游源码和许可文件，发现漂移则终止。
+# 输入：audit_directory。
+# 相关调用：(root / 'source-manifest.json').read_text、hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\x00' + data).hexdigest、hashlib.sha256(data).hexdigest。
+# 返回形式含：2 项组成的结果。
+# 异常约束：Unexpected upstream source commit
 def verify_source(audit_directory):
     root = Path(audit_directory).resolve()
     manifest = json.loads((root / 'source-manifest.json').read_text(encoding='utf-8'))
@@ -58,6 +68,10 @@ def verify_source(audit_directory):
     return source, manifest
 
 
+# 在专用进程中导入已经校验的上游模块，并接入受限的模型适配接口。
+# 输入：audit_directory。
+# 返回形式含：2 项组成的结果。
+# 异常约束：Use a dedicated process to avoid upstream module collisions
 def load_upstream(audit_directory):
     """Load only in a dedicated runner process; no old OpenAI dependency needed."""
     source, manifest = verify_source(audit_directory)
@@ -77,14 +91,22 @@ def load_upstream(audit_directory):
     return chain, manifest
 
 
+# LocalTextModel：为上游方法提供文本生成后端，使用其原有停止串规则。
 class LocalTextModel:
     """Greedy/sampled text generation with EOS/stop strings, never JSON stopping."""
+    # 初始化 LocalTextModel 的依赖及持久状态；具体预算和身份字段见赋值。
+    # 输入：config（显式运行配置）。
     def __init__(self, config):
         from .models import LocalModel
         self.base = LocalModel(config['model'], revision=config.get('revision'),
                                max_input_tokens=config.get('max_input_tokens', 8192),
                                device_map=config.get('device_map', 'balanced'), seed=config.get('seed', 42))
 
+    # 使用上游文本生成协议返回候选文本和生成使用量。
+    # 输入：messages（模型可见消息）；max_new_tokens；temperature；top_p；stop。
+    # 相关调用：base.model.generate。
+    # 返回形式含：字段 text、raw_text、input_tokens、output_tokens、model_seconds、cache_hit。
+    # 异常约束：Input exceeds configured context; no extra truncation in local text backend
     def generate_text(self, messages, *, max_new_tokens, temperature, top_p, stop=None):
         from transformers import StoppingCriteria, StoppingCriteriaList
         base = self.base; torch = base.torch
@@ -96,7 +118,10 @@ class LocalTextModel:
         length = tokens.shape[-1]; stops = [stop] if isinstance(stop, str) else list(stop or [])
         if any(not isinstance(s, str) or not s for s in stops):
             raise ValueError('Nonempty text stop strings required')
+        # TextStop：依据上游停止串判断是否结束文本生成。
         class TextStop(StoppingCriteria):
+            # 实现调用协议，在当前模型状态下判断停止条件或返回计算结果。
+            # 输入：ids；scores；**kwargs。
             def __call__(self, ids, scores, **kwargs):
                 text = base.tokenizer.decode(ids[0, length:], skip_special_tokens=True)
                 return any(s in text for s in stops)
@@ -118,19 +143,30 @@ class LocalTextModel:
                 'model_seconds': time.perf_counter() - started, 'cache_hit': False}
 
 
+# UpstreamTextAdapter：把本地生成输出适配成上游接口需要的样本与置信信息。
 class UpstreamTextAdapter:
     """Match upstream llm API and return-order confidence, recording every sample."""
+    # 初始化 UpstreamTextAdapter 的依赖及持久状态；具体预算和身份字段见赋值。
+    # 输入：backend；max_generations。
+    # 异常约束：Positive candidate generation cap required
     def __init__(self, backend, max_generations=256):
         if type(max_generations) is not int or max_generations < 1:
             raise ValueError('Positive candidate generation cap required')
         self.backend = backend; self.max_generations = max_generations
         self.calls = []; self.requests = 0
 
+    # 向上游调用方提供当前适配器支持的解码选项。
+    # 输入：temperature；per_example_max_decode_steps；per_example_top_p；n_sample。
     def get_model_options(self, temperature=0, per_example_max_decode_steps=150,
                           per_example_top_p=1, n_sample=1):
         return dict(temperature=temperature, n=n_sample, top_p=per_example_top_p,
                     max_tokens=per_example_max_decode_steps)
 
+    # 按上游返回顺序构造候选及分数，并登记每次真实生成。
+    # 输入：prompt；options；end_str。
+    # 相关调用：self.backend.generate_text。
+    # 返回形式含：results。
+    # 异常约束：Unsupported upstream candidate or output bound
     def generate_plus_with_score(self, prompt, options=None, end_str=None):
         options = deepcopy(options or self.get_model_options())
         n = options.get('n', 1); cap = options.get('max_tokens', 150)
@@ -160,11 +196,19 @@ class UpstreamTextAdapter:
             results.append((response['text'], math.log((n - i) / n)))
         return results
 
+    # 按当前适配接口生成或重放响应，同时保留调用所需的观测状态。
+    # 输入：prompt；options；end_str。
+    # 相关调用：self.generate_plus_with_score。
     def generate(self, prompt, options=None, end_str=None):
         options = deepcopy(options or self.get_model_options()); options['n'] = 1
         return self.generate_plus_with_score(prompt, options, end_str)[0][0]
 
 
+# 读取上游精确声明映射，核对映射键与题面原文。
+# 输入：path（输入或输出路径）。
+# 相关调用：read_jsonl。
+# 返回形式含：mapping。
+# 异常约束：Dater mappings require nonempty statement strings
 def load_dater_mapping(path):
     """Read the upstream exact-statement JSONL mapping."""
     from .data import read_jsonl
@@ -181,6 +225,10 @@ def load_dater_mapping(path):
     return mapping
 
 
+# 提取 TabFact 推理允许使用的题面、标题和原表，隔离参考标签。
+# 输入：sample（规范样本记录）；dater_mapping。
+# 返回形式含：字段 statement、cleaned_statement、table_caption、table_text、chain。
+# 异常约束：This upstream migration currently supports TabFact only
 def public_tabfact(sample, *, dater_mapping=None):
     if sample['dataset'] != 'tabfact' or sample['task'] != 'verification':
         raise ValueError('This upstream migration currently supports TabFact only')
@@ -193,11 +241,17 @@ def public_tabfact(sample, *, dater_mapping=None):
                           [[str(v) for v in row] for row in sample['table']['rows']], 'chain': []}
 
 
+# 把上游输出按冻结的标签格式解析，格式不合规时显式失败。
+# 输入：text（待解析文本）。
 def parse_tabfact_text(text):
     # Upstream simple_query strips surrounding whitespace before evaluation.
     return {'yes': 1, 'true': 1, 'no': 0, 'false': 0}.get(text.strip().lower())
 
 
+# 用固定上游规划和操作执行 TabFact，并记录模型迁移与格式失败。
+# 输入：sample（规范样本记录）；backend；chain_module；max_generations；dater_mapping。
+# 返回形式含：字段 id、dataset、mode、status、answer、failure、metrics。
+# 异常约束：Final text is not an exact upstream YES/NO/TRUE/FALSE label
 def predict_tabfact(sample, backend, chain_module, max_generations=256, *, dater_mapping=None):
     public = public_tabfact(sample, dater_mapping=dater_mapping)
     adapter = UpstreamTextAdapter(backend, max_generations)

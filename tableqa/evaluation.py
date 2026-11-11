@@ -1,3 +1,5 @@
+# 模块职责：计算诊断答案分数、完整队列成功率、延迟分位数和按样本配对的不确定性。
+# 接口约定：样本、操作和结果采用本项目的结构化字典；细节见各入口及字段检查。
 """Diagnostic metrics, explicit external-score import and paired uncertainty."""
 import math
 import random
@@ -6,10 +8,15 @@ import statistics
 from collections import Counter
 
 
+# 归一化诊断答案的大小写和空白，固定简单集合匹配口径。
+# 输入：v。
 def normalize(v):
     return re.sub(r"\s+", " ", str(v).strip().casefold())
 
 
+# 将允许的真假表示解析为 0/1；无法识别时返回 None。
+# 输入：v。
+# 返回形式含：None / 1 / 0。
 def label(v):
     if isinstance(v, list) and len(v) == 1: v = v[0]
     v = normalize(v)
@@ -18,6 +25,9 @@ def label(v):
     return None
 
 
+# 按短答、验证或自由文本计算诊断分数，运行失败计零。
+# 输入：prediction（单条预测或教师轨迹）；sample（规范样本记录）。
+# 返回形式含：0.0。
 def diagnostic_score(prediction, sample):
     if prediction["status"] != "ok": return 0.
     p, r = prediction["answer"], sample["reference"]
@@ -32,12 +42,18 @@ def diagnostic_score(prediction, sample):
     return 2 * overlap / total if total else 1.
 
 
+# 在排序后的观测上做线性插值，空列表保留缺失值。
+# 输入：values（待统计或序列化值）；p。
 def quantile(values, p):
     if not values: return None
     x = sorted(values); pos = (len(x) - 1) * p; low = math.floor(pos); high = math.ceil(pos)
     return x[low] + (x[high] - x[low]) * (pos - low)
 
 
+# 强制完整 ID 覆盖后，按数据集汇总分数、成功率与调用成本。
+# 输入：predictions（完整预测集合）；samples（固定样本集合）。
+# 返回形式含：result。
+# 异常约束：Duplicate predictions
 def evaluate(predictions, samples):
     by_id = {(r["dataset"], r["id"]): r for r in samples}
     keys = [(r["dataset"], r["id"]) for r in predictions]
@@ -61,6 +77,10 @@ def evaluate(predictions, samples):
     return result
 
 
+# 对相同样本的两组分数一起重采样，估计 B 减 A 的区间。
+# 输入：a；b；repeats（重采样次数）；seed（随机种子）。
+# 返回形式含：字段 difference_b_minus_a、ci95。
+# 异常约束：Paired nonempty equal-length scores required
 def paired_bootstrap(a, b, repeats=2000, seed=42):
     if not a or len(a) != len(b): raise ValueError("Paired nonempty equal-length scores required")
     rng = random.Random(seed); differences = []
@@ -71,6 +91,9 @@ def paired_bootstrap(a, b, repeats=2000, seed=42):
             "ci95": [quantile(differences, .025), quantile(differences, .975)]}
 
 
+# 按表长和预测操作特征生成事后诊断子组。
+# 输入：predictions（完整预测集合）；samples（固定样本集合）。
+# 返回形式含：列表记录。
 def subgroup_report(predictions, samples):
     lookup = {(r["dataset"], r["id"]): r for r in samples}; groups = {}
     for p in predictions:
@@ -83,6 +106,9 @@ def subgroup_report(predictions, samples):
             for (d,k),v in sorted(groups.items())]
 
 
+# 固定随机种子按运行状态选取案例，供后续人工分类。
+# 输入：predictions（完整预测集合）；seed（随机种子）；per_category。
+# 返回形式含：out。
 def select_cases(predictions, seed=42, per_category=5):
     groups = {}; rng = random.Random(seed)
     for p in sorted(predictions, key=lambda x: (x["dataset"], x["id"])):

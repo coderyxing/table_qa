@@ -1,3 +1,5 @@
+# 脚本用途：按 Python 3.12/Linux 标签选择 PyTorch 轮子并登记 PyPI 官方摘要。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Select the Python 3.12 Linux PyPI wheel; trust the official PyPI digest."""
 import json
 from pathlib import Path

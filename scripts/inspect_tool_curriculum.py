@@ -1,3 +1,5 @@
+# 脚本用途：只做分词和成本审计，检查合成工具候选的长度与监督分布。
+# 使用约定：先核对命令参数、输入划分和工作目录，再执行当前阶段；产物路径在正文中显式给出。
 """Tokenize and audit the synthetic candidate without loading model weights."""
 import argparse
 import json
@@ -6,11 +8,17 @@ from tableqa.data import read_jsonl, digest
 from tableqa.training import prepare_training_data
 
 
+# 解析当前脚本参数，按模块说明执行本次冻结阶段并保存产物。
+# 相关调用：read_jsonl、AutoTokenizer.from_pretrained、prepare_training_data、(root / 'candidate-training-config.json').write_text。
+# 异常约束：Preflight already exists
 def main():
+    # 定义本入口的参数解析器；位置参数、默认值和允许取值由相邻 add_argument 明确声明。
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('pool'); p.add_argument('model'); p.add_argument('initial_adapter'); p.add_argument('output')
+    # 解析本次命令的实际参数，后续样本路径和实验开关均由此确定。
     args = p.parse_args(); root = Path(args.output)
     if root.exists(): raise ValueError('Preflight already exists')
+    # 读取结构化输入：pool / 'records.jsonl'，保留原有样本身份字段。
     pool = Path(args.pool); records = read_jsonl(pool/'records.jsonl')
     report = json.loads((pool/'report.json').read_text())
     if not report['synthetic_only'] or digest(records) != report['records_sha256']:
@@ -24,6 +32,7 @@ def main():
     if not Path(config['initial_adapter'], 'adapter_config.json').is_file():
         raise ValueError('Initial adapter does not exist')
     from transformers import AutoTokenizer
+    # 使用本阶段指定的 tokenizer；预算、提示模板与监督掩码应沿用同一版本。
     tokenizer = AutoTokenizer.from_pretrained(config['model'], local_files_only=True)
     encoded, stats = prepare_training_data(config, records, tokenizer)
     lengths = [len(r['input_ids']) for r in encoded]

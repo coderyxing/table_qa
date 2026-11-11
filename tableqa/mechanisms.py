@@ -1,3 +1,5 @@
+# 模块职责：从实际预测中归纳格式、执行及修复失败，统计可观测的机制分布。
+# 接口约定：样本、操作和结果采用本项目的结构化字典；细节见各入口及字段检查。
 """Failure/repair diagnostics; recovery of execution is not semantic correctness."""
 from collections import Counter
 import random
@@ -5,6 +7,9 @@ from .analysis import validate_run, official_lookup, primary_score, metric_name,
 from .quality import audit_trajectory
 
 
+# 把原始错误消息映射为固定诊断类别。
+# 输入：message。
+# 返回形式含：'other' / kind。
 def error_kind(message):
     text = message.casefold()
     for fragments, kind in [
@@ -23,6 +28,9 @@ def error_kind(message):
     return 'other'
 
 
+# 统计逐步错误与修复转移，并保留证据和轨迹的观察口径。
+# 输入：samples（固定样本集合）；predictions（完整预测集合）；official_report；seed（随机种子）；examples_per_category。
+# 返回形式含：3 项组成的结果。
 def analyze_mechanisms(samples, predictions, official_report=None, seed=42, examples_per_category=3):
     refs, preds, _ = validate_run(samples, predictions)
     wtq = {k for k in refs if k[0] == 'wikitq'}

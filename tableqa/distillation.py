@@ -1,8 +1,14 @@
+# 模块职责：重放教师链、保守删步、切分操作块，并生成与线上提示一致的学生监督记录。
+# 接口约定：样本、操作和结果采用本项目的结构化字典；细节见各入口及字段检查。
 """Conservative, replay-verified rewrites and explicit feedback boundaries."""
 from copy import deepcopy
 from .core import ExecutionError, run_plan, TableState
 
 
+# 尝试有限删步与合并规则，每个候选都须在当前原表上保持完整执行签名。
+# 输入：state（当前执行状态）；operations（白名单操作序列）。
+# 相关调用：run_plan。
+# 返回形式含：result。
 def compress(state: TableState, operations: list[dict]) -> list[dict]:
     original, _ = run_plan(state, operations)
     result = deepcopy(operations)
@@ -33,6 +39,10 @@ def compress(state: TableState, operations: list[dict]) -> list[dict]:
     return result
 
 
+# 根据最大块长、答案和显式反馈需求切分操作序列。
+# 输入：operations（白名单操作序列）；max_size（最大操作块长）。
+# 返回形式含：result。
+# 异常约束：Block size must be positive
 def blocks(operations: list[dict], max_size=4) -> list[list[dict]]:
     if max_size < 1: raise ValueError("Block size must be positive")
     result, current = [], []
@@ -48,6 +58,11 @@ def blocks(operations: list[dict], max_size=4) -> list[list[dict]]:
     return result
 
 
+# 检查允许划分与审核状态，重放链并生成与线上状态一致的提示和目标。
+# 输入：sample（规范样本记录）；operations（白名单操作序列）；mode（实验模式）；max_size（最大操作块长）；allow_validation；compression_policy；partition；prepared_operations；typed_quantities；semantic_extract；tool_demonstrations。
+# 相关调用：run_plan。
+# 返回形式含：records。
+# 异常约束：Quantity supervision requires the explicit typed_quantities prompt
 def build_records(sample, operations, mode="B5", max_size=4, allow_validation=False, *,
                   compression_policy='legacy', partition=None, prepared_operations=None,
                   typed_quantities=False, semantic_extract=False, tool_demonstrations=False):
@@ -94,6 +109,7 @@ def build_records(sample, operations, mode="B5", max_size=4, allow_validation=Fa
         grouped=deepcopy(partition)
     else:grouped = blocks(ops, max_size if mode in {"B4", "B5"} else 1)
     history, records, full_trace = [], [], []
+    # 用当前公开快照构造下一步训练或推理的提示。
     def prompt():
         return context(sample, state, history if compact_state(mode) else full_trace,
                        mode, max_block=max_size if mode in {"B4", "B5"} else 1)
@@ -122,6 +138,9 @@ def build_records(sample, operations, mode="B5", max_size=4, allow_validation=Fa
     return records
 
 
+# 封装单条训练记录，保存样本身份、监督类型、消息与目标 JSON。
+# 输入：sample（规范样本记录）；kind；system；prompt；target。
+# 返回形式含：字段 id、dataset、split、kind、messages、target。
 def _record(sample, kind, system, prompt, target):
     import json
     return {"id": sample["id"], "dataset": sample["dataset"], "split": sample["split"], "kind": kind,

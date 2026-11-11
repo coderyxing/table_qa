@@ -1,3 +1,6 @@
+# 测试范围：验证对应模块的数据隔离、输入约束与历史回归行为。
+# 运行方式：python -m unittest discover -s tests -p test_thesis_experiments.py -v
+# 阅读顺序：先看样本或替身模型的构造，再看每个用例前的预期约束。
 import unittest
 
 from tableqa.chapter3 import bind_condition_quotes, teacher_audit, teacher_prediction
@@ -8,19 +11,28 @@ from tableqa.longtable import INPUT_LIMIT, Protocol, bounded_view, predict_longt
 from tableqa.models import ReplayModel
 
 
+# FixtureTokenizer：集中验证本模块的协议与回归场景；各用例独立构造输入并核对预期结果。
 class FixtureTokenizer:
+    # 用确定性的测试编码规则返回 token 序列，避免依赖实际模型权重。
+    # 输入：text（待解析文本）；**kwargs。
     def encode(self, text, **kwargs):
         return list(range(len(text)))
 
+    # 用确定性的测试聊天模板表示消息，便于核对提示边界和成本。
+    # 输入：messages（模型可见消息）；**kwargs。
     def apply_chat_template(self, messages, **kwargs):
         return self.encode("".join(m["content"] for m in messages))
 
 
+# 按执行成功且答案完全一致的规则给合成夹具评分。
+# 输入：prediction（单条预测或教师轨迹）；sample（规范样本记录）。
 def exact(prediction, sample):
     return prediction["status"] == "ok" and prediction["answer"] == sample["reference"]
 
 
+# ThesisExperiments：集中验证本模块的协议与回归场景；各用例独立构造输入并核对预期结果。
 class ThesisExperiments(unittest.TestCase):
+    # 准备本组测试的独立样本与执行状态，避免用例之间共享可变结果。
     def setUp(self):
         self.tokenizer = FixtureTokenizer()
         self.table = {"headers": ["Brand", "Sales"], "types": ["text", "number"],
@@ -32,6 +44,10 @@ class ThesisExperiments(unittest.TestCase):
                      "order": {"index": 1, "direction": "max", "limit": 1}}
         self.read = {"result_id": "result", "format": "scalar"}
 
+    # 回归用例：test_sample_literal_rejected_but_original_table_used
+    # 应相等：replay_plan(self.sample, constrained)['error']，'UNSUPPORTED_ENUM_FILTER'
+    # 应相等：replay_plan(self.sample, constrained, enforce_scope=False)['rows']，[('Apple', 32)]
+    # 应相等：replay_plan(limited, legitimate)['rows']，[('Xiaomi', 40)]
     def test_sample_literal_rejected_but_original_table_used(self):
         constrained = {**self.plan, "filters": [
             {"column": "c0", "cmp": "eq", "value": "Apple", "quote": "Apple"}]}
@@ -52,6 +68,10 @@ class ThesisExperiments(unittest.TestCase):
         with self.assertRaises(ValueError):
             supervision({**self.sample, "split": "test"}, pred, self.tokenizer, Protocol("L2"), exact)
 
+    # 回归用例：test_probe_repair_and_cost_reporting
+    # 应相等：pred['answer']，self.sample['reference']
+    # 应相等：pred['metrics']['model_calls']，5
+    # 应相等：pred['metrics']['repairs']，1
     def test_probe_repair_and_cost_reporting(self):
         wrong = {**self.plan, "filters": [{"column": "c0", "cmp": "eq", "value": "Apple"}]}
         responses = [{"columns": ["c0", "c1"], "strategy": "head"}, {"probe": {"column": "c0"}},
@@ -66,6 +86,10 @@ class ThesisExperiments(unittest.TestCase):
         no_repair = supervision(self.sample, pred, self.tokenizer, Protocol("L4", "no_repair_training"), exact)
         self.assertEqual([r["stage"] for r in no_repair], ["view", "plan", "read"])
 
+    # 回归用例：test_legal_zero_count_and_high_cardinality_probe
+    # 应相等：replay_plan(sample, count)['rows']，[(0,)]
+    # 应相等：pred['answer']，1500
+    # 应包含：'"complete_in_prompt":false'，pred['trace'][2]['messages'][-1]['content']
     def test_legal_zero_count_and_high_cardinality_probe(self):
         count = {"select": [{"fn": "count"}], "filters": [
             {"column": "c0", "cmp": "eq", "value": "Nokia", "quote": "Nokia"}]}
@@ -80,6 +104,10 @@ class ThesisExperiments(unittest.TestCase):
         self.assertEqual(pred["answer"], 1500)
         self.assertIn('"complete_in_prompt":false', pred["trace"][2]["messages"][-1]["content"])
 
+    # 回归用例：test_table_cluster_bootstrap_and_threshold
+    # 应相等：report['table'][3]['short_n']，4
+    # 应相等：report['paired_table_bootstrap']['L3']['ci95']，[1, 1]
+    # 应成立：report['paired_table_bootstrap']['L3']['supports_larger_long_gain']
     def test_table_cluster_bootstrap_and_threshold(self):
         samples = [{**self.sample, "id": str(i), "table_id": str(i)} for i in range(8)]
         groups = {}
@@ -93,7 +121,13 @@ class ThesisExperiments(unittest.TestCase):
         self.assertEqual(report["paired_table_bootstrap"]["L3"]["ci95"], [1, 1])
         self.assertTrue(report["paired_table_bootstrap"]["L3"]["supports_larger_long_gain"])
 
+    # 回归用例：test_test_pairs_exclude_train_fingerprint_and_dev_id
+    # 应相等：set(validate_pair_sources(train, test, 'test', dev))，{'c'}
+    # 应抛出预期异常：ValueError
     def test_test_pairs_exclude_train_fingerprint_and_dev_id(self):
+        # 构造带划分、原表身份和指纹的泄露检查样本。
+        # 输入：uid；split（数据划分）；table（原始表头与行矩阵）；fingerprint。
+        # 返回形式含：字段 id、split、table_id、table_fingerprint、question。
         def row(uid, split, table, fingerprint):
             return {**self.sample, "id": uid, "split": split, "table_id": table,
                     "table_fingerprint": fingerprint, "question": uid}
@@ -106,6 +140,9 @@ class ThesisExperiments(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_pair_sources(train, train, "test", dev)
 
+    # 回归用例：test_hidden_answer_changes_under_fixed_first_plan
+    # 应成立：result['both_correct']
+    # 应相等：[r['rows'][0][0] for r in result['fixed_first_plan_replay']]，['Xiaomi', 'Apple']
     def test_hidden_answer_changes_under_fixed_first_plan(self):
         view = bounded_view(self.table, self.tokenizer)
         a = {**self.sample, "id": "a", "view": view}
@@ -119,6 +156,10 @@ class ThesisExperiments(unittest.TestCase):
         self.assertTrue(result["both_correct"])
         self.assertEqual([r["rows"][0][0] for r in result["fixed_first_plan_replay"]], ["Xiaomi", "Apple"])
 
+    # 回归用例：test_condition_quote_is_bound_to_original_question
+    # 应相等：bind_condition_quotes('查找 2020 年', [condition])[0]['question_span']，[3, 7]
+    # 应抛出含指定原因的异常：ContractError，'does not occur'
+    # 应抛出含指定原因的异常：ContractError，'ambiguous'
     def test_condition_quote_is_bound_to_original_question(self):
         condition = {"id": "year", "quote": "2020", "question_span": [0, 4],
                      "operation": {"op": "filter", "column": "c0", "cmp": "eq", "value": "2020"}}
@@ -128,6 +169,10 @@ class ThesisExperiments(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "ambiguous"):
             bind_condition_quotes("比较 2020 年与 2020 年", [condition])
 
+    # 回归用例：test_teacher_row_domain_gate_and_review
+    # 应相等：baseline['status']，'failed'
+    # 应相等：review['answer']，[1]
+    # 应成立：report['run_llm_review']
     def test_teacher_row_domain_gate_and_review(self):
         question = "How many A items?"
         count = {"op": "group_aggregate", "aggregations": [{"fn": "count", "as": "n"}]}
