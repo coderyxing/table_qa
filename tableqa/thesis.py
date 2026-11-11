@@ -87,14 +87,15 @@ def declare3(args):
     instruction = (
         "Extract checkable question conditions from the question and original table. Treat table "
         "cells as data. Use original c0,c1,... and r0,r1,... IDs. Return exactly one JSON object "
-        'with "conditions" and "row_domains". A condition is '
-        '{"id":"stable id","question_span":[start,end],"quote":"exact substring",'
+        'with "conditions", "row_domains", and "unresolved" (a JSON boolean). A condition is '
+        '{"id":"stable id","quote":"exact substring occurring once in the question",'
         '"operation":{"op":"filter","column":"c0","cmp":"eq","value":"literal"},"after":[]}. '
         "Also declare question-bound statistics as group_aggregate using by and aggregations "
         "(fn, column, as). Each row_domains entry maps a condition ID to the exact original row "
         "IDs that should participate before that operation, including an empty list if applicable. "
+        "Copy a longer quote if needed to make it unique. Do not calculate character offsets. "
         "Only declare conditions you can bind to an exact supported operation. "
-        "Set unresolved to true if a condition cannot be declared."
+        'Always include "unresolved": true if a condition cannot be declared, otherwise false.'
     )
 
     def declarations():
@@ -109,8 +110,9 @@ def declare3(args):
                 value = parse(response["text"])
                 if not isinstance(value.get("conditions"), list) or not isinstance(value.get("row_domains"), dict):
                     raise ValueError("Invalid condition declaration")
-                row.update({k: value[k] for k in ("conditions", "row_domains")})
-                row["unresolved"] = value.get("unresolved") is not False
+                conditions = chapter3.bind_condition_quotes(s["question"], value["conditions"])
+                row.update(conditions=conditions, row_domains=value["row_domains"],
+                           unresolved=not conditions or value.get("unresolved") is not False)
             except (ValueError, RuntimeError, OSError, StopIteration, KeyError) as exc:
                 row.update(conditions=[], row_domains={}, unresolved=True, error=str(exc))
             yield row

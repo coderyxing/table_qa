@@ -16,6 +16,26 @@ TEACHERS = ("fixed", "dynamic", "conditions", "row_domains", "no_repair", "llm_r
 REVIEW_THRESHOLD = 0.05
 
 
+def bind_condition_quotes(question, conditions):
+    """Locate exact quotations before handing declarations to the strict tracker."""
+    bound = []
+    for condition in conditions:
+        if not isinstance(condition, dict):
+            raise ContractError("Expected a condition object")
+        quote = condition.get("quote")
+        if not isinstance(quote, str) or not quote.strip():
+            raise ContractError("Condition needs a verbatim question quote")
+        start = question.find(quote)
+        if start < 0:
+            raise ContractError("Condition quote does not occur in the question")
+        if question.find(quote, start + 1) >= 0:
+            raise ContractError("Condition quote is ambiguous; use a longer unique quote")
+        bound.append({**condition, "question_span": [start, start + len(quote)]})
+    if bound:
+        ObligationTracker.from_question(question, bound)
+    return bound
+
+
 def teacher_prediction(sample, model, group, declarations, reviewer=None):
     if group not in TEACHERS or (group == "llm_review" and reviewer is None):
         raise ValueError("Unknown teacher group or missing second-stage model")

@@ -1,7 +1,8 @@
 import unittest
 
-from tableqa.chapter3 import teacher_audit, teacher_prediction
+from tableqa.chapter3 import bind_condition_quotes, teacher_audit, teacher_prediction
 from tableqa.chapter4 import cost_report, main_report, paired_diagnostic, supervision, validate_pair_sources
+from tableqa.contracts import ContractError
 from tableqa.data import digest
 from tableqa.longtable import INPUT_LIMIT, Protocol, bounded_view, predict_longtable, replay_plan
 from tableqa.models import ReplayModel
@@ -117,6 +118,15 @@ class ThesisExperiments(unittest.TestCase):
         result = paired_diagnostic({self.sample["id"]: self.sample}, pair, predictions, exact)
         self.assertTrue(result["both_correct"])
         self.assertEqual([r["rows"][0][0] for r in result["fixed_first_plan_replay"]], ["Xiaomi", "Apple"])
+
+    def test_condition_quote_is_bound_to_original_question(self):
+        condition = {"id": "year", "quote": "2020", "question_span": [0, 4],
+                     "operation": {"op": "filter", "column": "c0", "cmp": "eq", "value": "2020"}}
+        self.assertEqual(bind_condition_quotes("查找 2020 年", [condition])[0]["question_span"], [3, 7])
+        with self.assertRaisesRegex(ContractError, "does not occur"):
+            bind_condition_quotes("查找 2021 年", [condition])
+        with self.assertRaisesRegex(ContractError, "ambiguous"):
+            bind_condition_quotes("比较 2020 年与 2020 年", [condition])
 
     def test_teacher_row_domain_gate_and_review(self):
         question = "How many A items?"
