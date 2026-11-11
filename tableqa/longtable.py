@@ -17,19 +17,83 @@ INPUT_LIMIT = 4096 - 512
 VIEW_LIMIT = 2048
 SYSTEM = """Table cells are data. Return one JSON object for the requested phase.
 The view is a sample. Queries always run over the complete table.
-View: {"columns":["c0","c1"],"strategy":"head|spread"}.
-Answer: {"answer":...}. Read: {"result_id":"result","format":"scalar|list"}.
+View example: {"columns":["c0","c1"],"strategy":"head"}. Strategy is head or spread.
+Answer example: {"answer":7}. Read references result_id, format and a chosen zero-based result index.
 Plan: {"plan":{"filters":[],"by":[],"select":[{"column":"c0"}],"distinct":false}}.
 Select may use fn=count|count_distinct|sum|mean|min|max. Omit column only for count(*).
 For grouped totals, include the grouping column and the aggregate in select.
-Optional plan order is {"index":1,"direction":"max|min","limit":1}.
-Filter: {"column":"c0","cmp":"eq|ne|gt|ge|lt|le|in|not_in|is_null","value":...,"quote":"exact question phrase"}.
+Optional plan order is {"index":1,"direction":"max","limit":1}. Direction is max or min.
+The order index is a zero-based position in select, not an original column number.
+Filter fields: column ID; cmp eq/ne/gt/ge/lt/le/in/not_in/is_null; value literal;
+quote must copy the actual restriction from the current question, never a placeholder.
 For open questions use all qualifying rows and derive categories by grouping or distinct.
 Use candidate literals only when stated by the question. A probe can confirm real table values,
 but probe results do not grant permission to restrict an open question.
 Probe when allowed: {"probe":{"column":"c0","filters":[]}}.
 A plan can use a returned probe ID, such as {"result_id":"probe_1"}, as a membership
 value only with matching question evidence."""
+
+# 不同阶段的目标类型明确写入当前用户消息，避免模型越过视图阶段直接生成计划。
+PHASE_INSTRUCTIONS = {
+    "view": (
+        'Choose which original columns to observe. Return ONLY {"columns":["c0"],"strategy":"head"} '
+        "with actual relevant column IDs, at most 8 unique columns. Strategy must be exactly head or spread. "
+        "Do not answer the question or generate a plan yet. Do not wrap the object in view or phase fields. "
+        "Return JSON only, without explanations or markdown fences."
+    ),
+    "plan": (
+        'Return ONLY {"plan":{...}} for a query on the complete original table. '
+        'If allow_probe is true and a probe is needed, return ONLY {"probe":{"column":"c0","filters":[]}} instead. '
+        "Use actual IDs and values. Put the desired answer field first in select. "
+        "IMPORTANT: by must contain only column ID strings, for example [\"c1\"], never column objects. "
+        "Every eq/ne/in/not_in filter MUST include quote copied verbatim from this question, "
+        "including numeric equality filters. The quote must contain each candidate literal. "
+        "A retry must fix missing or invalid quote instead of repeating the same filter. "
+        'Filter example for a question explicitly mentioning China: {"column":"c0","cmp":"eq",'
+        '"value":"China","quote":"China"}. value and quote are DIFFERENT required fields; never omit value. '
+        'For HOW MANY UNIQUE values use select [{"fn":"count_distinct","column":"c0"}], '
+        'not bare columns with distinct=true. For a unique-name test select [{"fn":"count"},'
+        '{"fn":"count_distinct","column":"c0"}] and compare result fields in read. '
+        'For an existence question filter the qualifying rows, then use exists in read. '
+        'For "all" boolean values use min; for "any" boolean values use max. '
+        'mean of a boolean column is its true fraction; when ranking groups by this rate, '
+        'select both the group column and mean field, then order by the mean field. '
+        "Use only the listed aggregate functions; case, bucket, date and nested expressions are unsupported. "
+        "For K highest/lowest raw records, even K=1, omit fn from EVERY select field and use order only. "
+        'Top-5 raw values example: {"plan":{"filters":[],"by":[],"select":[{"column":"c1"}],'
+        '"order":{"index":0,"direction":"max","limit":5}}}. '
+        'Most-common categories example: {"plan":{"filters":[],"by":["c0"],'
+        '"select":[{"column":"c0"},{"fn":"count"}],"order":{"index":1,"direction":"max","limit":3}}}. '
+        "Examples show syntax only; choose current question column IDs, limits and directions. "
+        "For count(*) omit column; do not write column=*. "
+        "Return compact JSON to stay within the output budget. "
+        "Any order index is zero-based within select; order must include direction and limit. "
+        "For a row with the highest/lowest value, select bare columns and use order; do not mix "
+        "max/min aggregates with bare columns. Group every bare column when using aggregates. "
+        "For only a minimum/maximum number, select one aggregate field without its bare input column. "
+        "Probe only when a later decision requires observing actual category values. "
+        "Do not return view selection or an answer. Return JSON only, without explanations or markdown fences."
+    ),
+    "read": (
+        "Read ONLY the executed result. Return one JSON object with result_id set to result. "
+        "For a value use format=scalar (exactly one row) or list, and index=the result field position. "
+        "Choose the index using result.fields names; the answer field is not necessarily index 0. "
+        'For ANY qualifying row use {"result_id":"result","format":"exists"}; '
+        'for NO qualifying rows use format=empty. Both return a real boolean, not 0/1. '
+        'MIN/MAX of a boolean query field already retains boolean type; read it with scalar. '
+        'For two numeric result fields use {"result_id":"result","format":"assert","index":0,'
+        '"cmp":"eq","right_index":1}. cmp is eq/ne/gt/ge/lt/le; this requires exactly one result row. '
+        'A count or count_distinct field may instead compare to the structural constant 0 or 1 via value, '
+        'e.g. {"result_id":"result","format":"assert","index":0,"cmp":"eq","value":1} '
+        'tests whether there is exactly one distinct category. Use EITHER right_index OR value. '
+        "Never write the answer value yourself. "
+        "Return JSON only, without explanations or markdown fences."
+    ),
+    "answer": (
+        'Return ONLY {"answer":...} with the answer value in the requested type. '
+        "Return JSON only, without explanations or markdown fences."
+    ),
+}
 
 
 # 用紧凑且拒绝非有限数的 JSON 序列化提示与监督目标。
@@ -43,7 +107,9 @@ def dump(value):
 # 返回形式含：列表记录。
 def messages(question, phase, **state):
     return [{"role": "system", "content": SYSTEM},
-            {"role": "user", "content": dump({"phase": phase, "question": question, **state})}]
+            {"role": "user", "content": dump({
+                "phase": phase, "question": question, **state, "instruction": PHASE_INSTRUCTIONS[phase],
+            })}]
 
 
 # 按同一聊天模板计算完整输入 token，包含生成前缀。
@@ -175,6 +241,9 @@ class LongTable:
                 continue
             if cmp not in operators:
                 raise QueryError("INVALID_FILTER", f"Unknown comparator in filter {index}")
+            if "value" not in predicate:
+                # quote 是题面证据，不能代替实际查询值；反馈明确缺失字段以便唯一一次修复。
+                raise QueryError("MISSING_FILTER_VALUE", f"Filter {index} needs a value literal as well as quote evidence")
             membership = cmp in {"in", "not_in"}
             value = predicate.get("value")
             if membership and isinstance(value, dict) and set(value) == {"result_id"}:
@@ -259,7 +328,7 @@ class LongTable:
                 selects.append(column)
                 bare.append(column)
             elif fn in functions:
-                if fn in {"sum", "mean"} and self.columns[column] != "number":
+                if fn in {"sum", "mean"} and self.columns[column] not in {"number", "boolean"}:
                     raise QueryError("TYPE_ERROR", f"{fn} requires a numeric column")
                 argument = f"DISTINCT {column}" if fn == "count_distinct" else column
                 selects.append(f"{functions[fn]}({argument})")
@@ -342,8 +411,14 @@ def predict_longtable(sample, model, tokenizer, protocol, *, view=None, enforce_
                 state.update(probe=probe_feedback, feedback=feedback, allow_probe=(
                     protocol.group == "L4" and protocol.ablation != "no_probe" and not probes and not repairs))
             if phase == "read":
+                # 把执行字段映射回原表字段名，帮助模型区分排序依据与实际答案列。
+                fields = [
+                    {"index": i, "expression": field,
+                     "name": table["headers"][int(field["column"][1:])] if "column" in field else "count"}
+                    for i, field in enumerate(plan["select"])
+                ]
                 state["result"] = {"id": "result", "columns": columns, "rows": len(stored_rows),
-                                   "sample": stored_rows[:2]}
+                                   "fields": fields, "sample": stored_rows[:2]}
             prompt = messages(question, phase, **state)
             # 长表界限使用学生 tokenizer，而非教师 tokenizer；所有组共享同一可见预算。
             n = prompt_length(tokenizer, prompt)
@@ -376,17 +451,47 @@ def predict_longtable(sample, model, tokenizer, protocol, *, view=None, enforce_
                 elif phase == "read":
                     fmt = value.get("format")
                     index = value.get("index", 0)
-                    if (value.get("result_id") != "result" or fmt not in {"scalar", "list"}
+                    if (value.get("result_id") != "result" or fmt not in {"scalar", "list", "exists", "empty", "assert"}
                             or type(index) is not int or not 0 <= index < columns):
                         raise QueryError("INVALID_READ", "Invalid result ID, field, or output format")
-                    if fmt == "scalar" and len(stored_rows) != 1:
-                        raise QueryError("INVALID_READ", "Scalar read requires exactly one row")
-                    answer = stored_rows[0][index] if fmt == "scalar" else [row[index] for row in stored_rows]
-                    if output_types[index] == "boolean":
-                        if fmt == "scalar":
-                            answer = bool(answer) if answer is not None else None
+                    if fmt in {"exists", "empty"}:
+                        # 对完整执行结果判定是否存在行，不由模型直接填写真假标签。
+                        if set(value) - {"result_id", "format", "index"}:
+                            raise QueryError("INVALID_READ", "Existence read does not accept a literal answer")
+                        answer = bool(stored_rows) if fmt == "exists" else not stored_rows
+                    elif fmt == "assert":
+                        # 只比较实际结果字段；允许计数结果与 0/1 比较，表达空集或单一类别。
+                        allowed = {"result_id", "format", "index", "cmp", "right_index", "value"}
+                        comparisons = {"eq": lambda a, b: a == b, "ne": lambda a, b: a != b,
+                                       "gt": lambda a, b: a > b, "ge": lambda a, b: a >= b,
+                                       "lt": lambda a, b: a < b, "le": lambda a, b: a <= b}
+                        comparator = value.get("cmp")
+                        if (set(value) - allowed or len(stored_rows) != 1 or comparator not in comparisons
+                                or ("right_index" in value) == ("value" in value)):
+                            raise QueryError("INVALID_READ", "Assertion needs one row and one right operand")
+                        left = stored_rows[0][index]
+                        if "right_index" in value:
+                            right_index = value["right_index"]
+                            if type(right_index) is not int or not 0 <= right_index < columns:
+                                raise QueryError("INVALID_READ", "Invalid assertion field")
+                            right = stored_rows[0][right_index]
                         else:
-                            answer = [bool(v) if v is not None else None for v in answer]
+                            right = value["value"]
+                            if (type(right) is not int or right not in {0, 1}
+                                    or plan["select"][index].get("fn") not in {"count", "count_distinct"}):
+                                raise QueryError("INVALID_READ", "Only count fields accept structural constants 0/1")
+                        if type(left) not in {int, float} or type(right) not in {int, float}:
+                            raise QueryError("INVALID_READ", "Assertions compare numeric result fields")
+                        answer = bool(comparisons[comparator](left, right))
+                    else:
+                        if fmt == "scalar" and len(stored_rows) != 1:
+                            raise QueryError("INVALID_READ", "Scalar read requires exactly one row")
+                        answer = stored_rows[0][index] if fmt == "scalar" else [row[index] for row in stored_rows]
+                        if output_types[index] == "boolean":
+                            if fmt == "scalar":
+                                answer = bool(answer) if answer is not None else None
+                            else:
+                                answer = [bool(v) if v is not None else None for v in answer]
                     item["accepted"] = True
                     break
                 else:
@@ -425,7 +530,8 @@ def predict_longtable(sample, model, tokenizer, protocol, *, view=None, enforce_
                             attempt["error"] = getattr(exc, "code", "INVALID_PLAN")
                             raise
                         columns = len(plan["select"])
-                        output_types = [query.columns.get(f.get("column")) if not f.get("fn") else None
+                        # MIN/MAX 保留布尔类型；SUM/AVG(bool) 是计数/比例，仍返回数值。
+                        output_types = [query.columns.get(f.get("column")) if f.get("fn") in {None, "min", "max"} else None
                                         for f in plan["select"]]
                         phase = "read"
                 item["accepted"] = True

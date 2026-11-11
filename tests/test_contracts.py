@@ -2,7 +2,7 @@
 # 运行方式：python -m unittest discover -s tests -p test_contracts.py -v
 # 阅读顺序：先看样本或替身模型的构造，再看每个用例前的预期约束。
 import unittest
-from tableqa.contracts import ObligationTracker, ContractError, run_contracted_block, verify_condition_rewrite
+from tableqa.contracts import ObligationTracker, ContractError, run_contracted_block, verify_condition_rewrite, fingerprint
 from tableqa.core import TableState, run_plan, ExecutionError
 
 
@@ -31,6 +31,36 @@ def state():return TableState.from_table({'headers':['Year','Team','Score'],'row
 
 # ContractTests：集中验证本模块的协议与回归场景；各用例独立构造输入并核对预期结果。
 class ContractTests(unittest.TestCase):
+    # 复现真实误拒：声明省略文本默认类型，模型显式写出 text 后仍应履行同一条件。
+    def test_explicit_text_default_satisfies_filter_before_projection(self):
+        predicate={'op':'filter','column':'c0','cmp':'eq','value':'Unforgettable'}
+        t=ObligationTracker.from_question('Unforgettable',[{
+            'id':'title','quote':'Unforgettable','question_span':[0,13],'operation':predicate}])
+        initial=TableState.from_table({'headers':['Title','Year'],
+            'rows':[['Unforgettable','2017'],['Other','2018']]})
+        result,finished,_=run_contracted_block(initial,[
+            {**predicate,'type':'text','invalid_number':'error'},
+            {'op':'project','columns':['c1']},{'op':'answer','columns':['c1']}],t)
+        self.assertEqual(result.answer,['2017'])
+        self.assertFalse(finished.report()['pending_ids'])
+        self.assertNotIn('type',predicate)  # 指纹规范化不能修改调用方保存的原始声明。
+
+    # 默认排序与显式正序文本排序相同，逆序仍是另一项操作。
+    def test_sort_defaults_match_without_equating_descending(self):
+        operation={'op':'sort','column':'c1'}
+        explicit={**operation,'type':'text','descending':False}
+        self.assertEqual(fingerprint(operation),fingerprint(explicit))
+        self.assertNotEqual(fingerprint(operation),fingerprint({**explicit,'descending':True}))
+
+    # 修复仅合并缺省写法，不能把数值比较、比较边界或脏值跳过策略合并。
+    def test_default_normalization_keeps_semantic_differences(self):
+        operation={'op':'filter','column':'c0','cmp':'gt','value':'10'}
+        for different in ({**operation,'type':'number'}, {**operation,'cmp':'ge'},
+                          {**operation,'type':'number','invalid_number':'skip'}):
+            self.assertNotEqual(fingerprint(operation),fingerprint(different))
+        numeric={**operation,'type':'number'}
+        self.assertNotEqual(fingerprint(numeric),fingerprint({**numeric,'invalid_number':'skip'}))
+
     # 回归用例：test_valid_blocks_keep_obligations_across_calls
     # 应相等：t.report()['pending_ids']，['maximum']
     # 应相等：final.answer，['C']

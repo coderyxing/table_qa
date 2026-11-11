@@ -2,21 +2,23 @@
 # 运行方式：python -m unittest discover -s tests -p test_thesis_experiments.py -v
 # 阅读顺序：先看样本或替身模型的构造，再看每个用例前的预期约束。
 import unittest
+import json
 
 from tableqa.chapter3 import bind_condition_quotes, teacher_audit, teacher_prediction
 from tableqa.chapter4 import cost_report, main_report, paired_diagnostic, supervision, validate_pair_sources
 from tableqa.contracts import ContractError
 from tableqa.data import digest
-from tableqa.longtable import INPUT_LIMIT, Protocol, bounded_view, predict_longtable, replay_plan
+from tableqa.longtable import INPUT_LIMIT, Protocol, bounded_view, messages, predict_longtable, replay_plan
 from tableqa.models import ReplayModel
 
 
 # FixtureTokenizer：集中验证本模块的协议与回归场景；各用例独立构造输入并核对预期结果。
 class FixtureTokenizer:
-    # 用确定性的测试编码规则返回 token 序列，避免依赖实际模型权重。
+    # 用固定四字符一 token 近似控制协议分支，避免把英文指令每个字符都算一个 token。
+    # 真实输入上限另由服务器固定 Qwen tokenizer 检查；此处不承担 tokenizer 精度验证。
     # 输入：text（待解析文本）；**kwargs。
     def encode(self, text, **kwargs):
-        return list(range(len(text)))
+        return list(range((len(text) + 3) // 4))
 
     # 用确定性的测试聊天模板表示消息，便于核对提示边界和成本。
     # 输入：messages（模型可见消息）；**kwargs。
@@ -32,6 +34,17 @@ def exact(prediction, sample):
 
 # ThesisExperiments：集中验证本模块的协议与回归场景；各用例独立构造输入并核对预期结果。
 class ThesisExperiments(unittest.TestCase):
+    # 确保视图阶段明确只要求列选择，计划阶段明确查询索引语义，减少阶段混淆。
+    def test_each_phase_has_an_explicit_output_contract(self):
+        import json
+        view = json.loads(messages("Which value?", "view", schema={})[-1]["content"])
+        plan = json.loads(messages("Which value?", "plan", view={})[-1]["content"])
+        read = json.loads(messages("Which value?", "read", result={})[-1]["content"])
+        self.assertIn("Do not answer", view["instruction"])
+        self.assertIn("zero-based", plan["instruction"])
+        self.assertIn("result_id set to result", read["instruction"])
+        self.assertIn("not necessarily index 0", read["instruction"])
+
     # 准备本组测试的独立样本与执行状态，避免用例之间共享可变结果。
     def setUp(self):
         self.tokenizer = FixtureTokenizer()
@@ -62,6 +75,9 @@ class ThesisExperiments(unittest.TestCase):
         pred = predict_longtable(self.sample, ReplayModel([{"plan": self.plan}, self.read]),
                                  self.tokenizer, Protocol("L2"))
         self.assertEqual(pred["answer"], "Xiaomi")
+        # 结果提示必须将位置映射到真实字段名，帮助读出阶段选择答案列。
+        result_state = json.loads(pred["trace"][-1]["messages"][-1]["content"])["result"]
+        self.assertEqual([(f["index"], f["name"]) for f in result_state["fields"]], [(0, "Brand"), (1, "Sales")])
         self.assertGreater(pred["metrics"]["cpu_query_seconds"], 0)
         self.assertEqual(pred["metrics"]["cpu_probe_seconds"], 0)
         self.assertEqual(len(supervision(self.sample, pred, self.tokenizer, Protocol("L2"), exact)), 2)

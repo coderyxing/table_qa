@@ -24,6 +24,14 @@ class ContractError(ExecutionError):
 def fingerprint(operation):
     # Feedback annotations are separately enforced by block/partition policies.
     value={k:v for k,v in operation.items() if k!='requires_feedback'}
+    # 按执行器真实默认值补齐指纹，避免把省略 type 的文本筛选误认为另一条操作。
+    # 只统一已证明等价的缺省写法，显式 number、比较符和数值策略仍严格区分。
+    if value.get('op') in {'filter','sort'}:
+        value.setdefault('type','text')
+    if value.get('op')=='filter':
+        value.setdefault('invalid_number','error')
+    if value.get('op')=='sort':
+        value.setdefault('descending',False)
     try:
         text=json.dumps(value,sort_keys=True,ensure_ascii=False,allow_nan=False)
     except (TypeError,ValueError) as exc:
