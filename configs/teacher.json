@@ -1,0 +1,12 @@
+{
+  "mode": "A4",
+  "model_config": {
+    "backend": "local",
+    "model": "Qwen/Qwen2.5-32B-Instruct",
+    "device_map": "balanced",
+    "max_input_tokens": 4096,
+    "max_new_tokens": 1536,
+    "seed": 42
+  },
+  "settings": {"dependency": true, "evidence": true, "max_repairs": 1}
+}

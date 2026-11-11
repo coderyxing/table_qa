@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evidence-tableqa"
+version = "0.1.0"
+description = "Executable, provenance-preserving table reasoning and block distillation"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+train = ["torch>=2.2,<3", "transformers>=4.46,<5", "peft>=0.13,<0.19", "accelerate>=1,<2", "safetensors>=0.4"]
+metrics = ["sacrebleu>=2.4,<3", "rouge-score>=0.1.2,<0.2"]
+databench = ["databench-eval==4.0.1", "datasets>=3,<5", "pyarrow>=16"]
+
+[project.scripts]
+tableqa = "tableqa.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["tableqa*"]

@@ -1,0 +1,13 @@
+{
+  "model": "Qwen/Qwen2.5-3B-Instruct",
+  "seed": 42,
+  "sampling_policy": "coverage",
+  "max_seq_length": 4096,
+  "lora_rank": 32,
+  "lora_alpha": 64,
+  "learning_rate": 0.0002,
+  "answer_weight": 1,
+  "micro_batch": 1,
+  "gradient_accumulation_steps": 16,
+  "max_epochs": 3
+}

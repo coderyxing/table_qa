@@ -1,0 +1,11 @@
+# Conservative initial Linux / Python 3.10-3.12 environment.
+# Candidate pins: validate on GPU12, then retain the generated pip freeze.
+torch==2.5.1
+transformers==4.46.3
+tokenizers==0.20.3
+peft==0.13.2
+accelerate==1.1.1
+safetensors==0.4.5
+numpy==1.26.4
+sacrebleu==2.4.3
+rouge-score==0.1.2

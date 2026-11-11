@@ -1,0 +1,14 @@
+{
+  "mode": "B5",
+  "model_config": {
+    "backend": "local",
+    "model": "Qwen/Qwen2.5-3B-Instruct",
+    "adapter": "runs/student-b5",
+    "device_map": "auto",
+    "max_input_tokens": 4096,
+    "max_new_tokens": 1024,
+    "seed": 42
+  },
+  "settings": {"max_block": 4, "max_operations": 8, "max_repairs": 1},
+  "benchmark": true
+}
